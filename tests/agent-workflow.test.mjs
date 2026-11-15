@@ -25,6 +25,13 @@ test("readiness is a pure, conservative local summary", () => {
   assert.ok(blocked.blockers.some(({code}) => code === "signed_configuration"));
   assert.equal(result.capabilities.signed_mqtt, "unknown");
   assert.match(AGENT_WORKFLOW_TEXT, /--min-save.*SLICED.*does not resolve incomplete profiles/);
+  const setup = getAgentGuideResource("bambu://workflow/setup");
+  const signing = getAgentGuideResource("bambu://workflow/signing");
+  assert.match(setup, /preserve the person’s cloud and Bambu Handy preference/);
+  assert.match(setup, /LAN Only disconnects cloud/);
+  assert.match(signing, /do not switch to LAN Only automatically/);
+  assert.match(signing, /account session is not the application PEM signing bundle/);
+  assert.match(signing, /Signing does not upload files/);
   const slicing = getAgentGuideResource("bambu://workflow/slicing");
   assert.match(slicing, /MCP profile resolver/);
   assert.match(slicing, /recursively resolve inheritance and includes/);
