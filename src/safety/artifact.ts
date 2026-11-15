@@ -1,3 +1,4 @@
+import { assertOperationActive } from "../operation-context.js";
 import fs from "node:fs/promises";
 import { rmSync } from "node:fs";
 import path from "node:path";
@@ -20,6 +21,7 @@ export async function withPrinterOperation<T>(_host: string, serial: string, ope
   const key = serial;
   const generation = generations.get(key) ?? 0;
   const assertActive = () => {
+    assertOperationActive();
     if ((generations.get(key) ?? 0) !== generation) throw new Error("Pending printer operation cancelled by stop or heater-off request.");
   };
   const previous = operations.get(key) ?? Promise.resolve();

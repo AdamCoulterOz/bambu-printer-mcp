@@ -1,3 +1,4 @@
+import { assertOperationActive } from "../operation-context.js";
 import { signedControlsRequested, resolveSignedControlConfiguration, sendSignedControl } from "../signing-transport.js";
 import type { CommandInput } from "../signing/index.js";
 import {snapshotFrame} from "../counterpart/fresh-frame.js";
@@ -68,6 +69,7 @@ const stopAckMs = () => { const value = Number(process.env.BAMBU_STOP_ACK_MS); r
  * publish has no QoS (MQTT.js defaults to 0).
  */
 function publishStudioJson(client: BambuClient, message: Record<string, any>, qos: 0 | 1): Promise<void> {
+  assertOperationActive();
   const mqttClient = (client as any).mqttClient;
   const serial = (client as any).config?.serialNumber;
   if (!mqttClient || typeof mqttClient.publish !== "function" || typeof serial !== "string") return client.publish(message);
@@ -253,6 +255,7 @@ function resolveModelName(data: Record<string, any>): string {
 }
 
 async function invokeWithoutAck(printer: BambuClient, command: { invoke(client: BambuClient): Promise<void> }) {
+  assertOperationActive();
   await command.invoke(printer);
   await sleep(COMMAND_SETTLE_MS);
 }
@@ -1422,6 +1425,7 @@ export class BambuImplementation {
       } else {
         this.recordFlightDispatch(host,serial,remoteProjectPath,requirements,resumeFile);
         markPrintCommandSent();
+        assertOperationActive();
         await printer.publish(projectFileCmd);
       }
     } catch (error) {
@@ -1501,7 +1505,7 @@ export class BambuImplementation {
         };
         signal.addEventListener("abort", onAbort, { once: true });
         if (signal.aborted) onAbort();
-        else command.invoke(printer).then(resolve, reject);
+        else { assertOperationActive(); command.invoke(printer).then(resolve, reject); }
       });
     } finally {
       signal.removeEventListener("abort", onAbort!);
@@ -1669,6 +1673,7 @@ export class BambuImplementation {
       if (dispatch) await dispatch(assertActive, beforeDispatch);
       else {
         await beforeDispatch();
+        assertOperationActive();
         await printer!.publish({ print: { command: "clean_print_error", sequence_id: "0" } });
       }
       this.clearedErrors.set(serial, codes);
@@ -1692,6 +1697,7 @@ export class BambuImplementation {
       throw new Error("Print speed mode must be one of: silent, standard, sport, ludicrous, 1, 2, 3, 4.");
     }
 
+    assertOperationActive();
     await printer.publish({
       print: {
         command: "print_speed",
@@ -1716,6 +1722,7 @@ export class BambuImplementation {
       throw new Error("Airduct mode must be one of: cooling, heating.");
     }
 
+    assertOperationActive();
     await printer.publish({
       print: {
         command: "set_airduct",
@@ -1750,6 +1757,7 @@ export class BambuImplementation {
     }
 
     const printer = await this.getPrinter(host, serial, token);
+    assertOperationActive();
     await printer.publish({
       print: {
         command: "ams_get_rfid",
@@ -1921,6 +1929,7 @@ export class BambuImplementation {
 
     const param = normalizedAction === "start" ? "start_drying" : "stop_drying";
     const printer = await this.getPrinter(host, serial, token);
+    assertOperationActive();
     await printer.publish({
       print: {
         command: "ams_control",
@@ -1955,6 +1964,7 @@ export class BambuImplementation {
       throw new Error("At least one non-negative object id is required.");
     }
 
+    assertOperationActive();
     await printer.publish({
       print: {
         sequence_id: "0",
@@ -2586,6 +2596,7 @@ export class BambuImplementation {
       });
       await this.waitForTlsSession(client);
       const absoluteRemote = remotePath.startsWith("/") ? remotePath : `/${remotePath}`;
+      assertOperationActive();
       await client.remove(absoluteRemote);
     } finally {
       client.close();
@@ -2629,6 +2640,7 @@ export class BambuImplementation {
       }
       const fileData = await fs.readFile(localPath);
       // Small writes, so a multi-megabyte job on a slow SD card is not mistaken for a stall.
+      assertOperationActive();
       await uploadBytes(client, fileData, absoluteRemote, { onProgress });
     } finally {
       client.close();

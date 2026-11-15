@@ -62,6 +62,18 @@ npm link
 
 ---
 
+## Shared private HTTP service
+
+Run one supervised server process with `MCP_TRANSPORT=streamable-http`, a loopback `MCP_HTTP_HOST`, and `MCP_HTTP_BEARER_TOKEN_FILE` pointing to an owner-only regular file containing a nonempty token without whitespace. Configure this process and client connections outside MCP; preserve existing client settings. The server reads the token at startup. The alternative `MCP_HTTP_BEARER_TOKEN` is an environment value: configure only one source. Never put tokens in source files or chat.
+
+Each client initializes its own stateful MCP session against the one shared backend. A session DELETE or idle expiry closes that client's protocol session, not the shared printer backend; process shutdown owns full cleanup. Elicitation and cancellation remain bound to their originating request. Sessions, request bodies and idle lifetime are bounded. The former `MCP_HTTP_STATEFUL=false` mode is unsupported and now fails startup; remove it or set `true` when migrating.
+
+Prefer loopback for a private deployment. Non-loopback requires a bearer token. An explicit `MCP_HTTP_ALLOWED_HOSTS` list is recommended for every non-loopback deployment and required for hostname or wildcard binds; a literal IP bind without one enforces its exact Host. Configure allowed browser origins with `MCP_HTTP_ALLOWED_ORIGINS` when needed. The server itself is HTTP, not TLS: any non-loopback deployment also needs separately protected TLS transport. A successful connection does not verify printer operations.
+
+For direct HTTP clients, the current Codex CLI accepts `codex mcp add <name> --url <url> --bearer-token-env-var <variable-name>`; provide the token privately to the Codex process via that environment variable. Claude Code accepts `claude mcp add --transport http <name> <url> --header <authorization-header>`; its configured header contains a secret, so protect that client configuration. These are client configuration operations and do not start another backend.
+
+For a stdio-only client such as Claude Desktop, configure its stdio command as `bambu-printer-mcp-http-client`, with `BAMBU_MCP_HTTP_URL` and `BAMBU_MCP_HTTP_TOKEN_FILE` pointing to the service and an owner-only token file. The adapter is a protocol relay, not another printer server; it supports HTTPS or loopback HTTP, has no OAuth flow and does not replay requests. On stdin EOF it attempts to delete only its own session. An interrupted request can have an unknown outcome; check state before retrying. The server and client adapter must be available to their respective processes; no service manager is installed automatically.
+
 ## Configuration
 
 Create a `.env` file in the directory where you run the server, or pass environment variables directly in your MCP client config. All printer connection variables can also be passed as tool arguments on a per-call basis, which is useful when working with multiple printers.
@@ -158,9 +170,14 @@ FUSION_MCP_PORT=9877
 | `MCP_HTTP_HOST` | `127.0.0.1` | No | HTTP bind address (HTTP transport only) |
 | `MCP_HTTP_PORT` | `3000` | No | HTTP port (HTTP transport only) |
 | `MCP_HTTP_PATH` | `/mcp` | No | HTTP endpoint path (HTTP transport only) |
-| `MCP_HTTP_STATEFUL` | `true` | No | Enable stateful HTTP sessions |
-| `MCP_HTTP_JSON_RESPONSE` | `true` | No | Return structured JSON alongside text responses |
-| `MCP_HTTP_ALLOWED_ORIGINS` | | No | Comma-separated list of allowed CORS origins |
+| `MCP_HTTP_STATEFUL` | `true` | No | Stateful sessions are required; `false` is unsupported and fails startup |
+| `MCP_HTTP_JSON_RESPONSE` | `true` | No | Select JSON responses for Streamable HTTP |
+| `MCP_HTTP_ALLOWED_ORIGINS` | | No | Comma-separated allowed browser Origin values; requests without Origin are allowed |
+| `MCP_HTTP_ALLOWED_HOSTS` | | No | Comma-separated exact HTTP Host headers, including port; configure explicitly for non-loopback deployments |
+| `MCP_HTTP_BEARER_TOKEN_FILE` | | No | Private owner-only token file; read once at startup. Set only one token source |
+| `MCP_HTTP_BEARER_TOKEN` | | No | Alternative bearer token environment value; prefer the private file and never set both |
+| `BAMBU_MCP_HTTP_URL` | `http://127.0.0.1:3000/mcp` | No | URL for the stdio-to-HTTP client adapter; HTTPS or loopback HTTP only |
+| `BAMBU_MCP_HTTP_TOKEN_FILE` | | Adapter | Owner-only token file required by the stdio-to-HTTP client adapter |
 | `BLENDER_MCP_COMMAND` | | No | Trusted executable for a standard stdio Blender MCP server, e.g. full path to `uvx` |
 | `BLENDER_MCP_ARGS` | `[]` | No | JSON array of server arguments, e.g. `["blender-mcp"]`; no shell parsing |
 | `BLENDER_MCP_TIMEOUT_MS` | `120000` | No | Connection/discovery/call deadline, 100–300000 ms; interrupted edits are never retried automatically |

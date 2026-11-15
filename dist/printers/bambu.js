@@ -1,3 +1,4 @@
+import { assertOperationActive } from "../operation-context.js";
 import { signedControlsRequested, resolveSignedControlConfiguration, sendSignedControl } from "../signing-transport.js";
 import { snapshotFrame } from "../counterpart/fresh-frame.js";
 import { FlightRecords, flightKey } from "../counterpart/flight-record.js";
@@ -58,6 +59,7 @@ const stopAckMs = () => { const value = Number(process.env.BAMBU_STOP_ACK_MS); r
  * publish has no QoS (MQTT.js defaults to 0).
  */
 function publishStudioJson(client, message, qos) {
+    assertOperationActive();
     const mqttClient = client.mqttClient;
     const serial = client.config?.serialNumber;
     if (!mqttClient || typeof mqttClient.publish !== "function" || typeof serial !== "string")
@@ -182,6 +184,7 @@ function resolveModelName(data) {
         "Unknown");
 }
 async function invokeWithoutAck(printer, command) {
+    assertOperationActive();
     await command.invoke(printer);
     await sleep(COMMAND_SETTLE_MS);
 }
@@ -1261,6 +1264,7 @@ export class BambuImplementation {
             else {
                 this.recordFlightDispatch(host, serial, remoteProjectPath, requirements, resumeFile);
                 markPrintCommandSent();
+                assertOperationActive();
                 await printer.publish(projectFileCmd);
             }
         }
@@ -1345,8 +1349,10 @@ export class BambuImplementation {
                 signal.addEventListener("abort", onAbort, { once: true });
                 if (signal.aborted)
                     onAbort();
-                else
+                else {
+                    assertOperationActive();
                     command.invoke(printer).then(resolve, reject);
+                }
             });
         }
         finally {
@@ -1527,6 +1533,7 @@ export class BambuImplementation {
                 await dispatch(assertActive, beforeDispatch);
             else {
                 await beforeDispatch();
+                assertOperationActive();
                 await printer.publish({ print: { command: "clean_print_error", sequence_id: "0" } });
             }
             this.clearedErrors.set(serial, codes);
@@ -1545,6 +1552,7 @@ export class BambuImplementation {
         if (!Number.isInteger(mode) || mode < 1 || mode > 4) {
             throw new Error("Print speed mode must be one of: silent, standard, sport, ludicrous, 1, 2, 3, 4.");
         }
+        assertOperationActive();
         await printer.publish({
             print: {
                 command: "print_speed",
@@ -1567,6 +1575,7 @@ export class BambuImplementation {
         if (normalizedMode !== "cooling" && normalizedMode !== "heating") {
             throw new Error("Airduct mode must be one of: cooling, heating.");
         }
+        assertOperationActive();
         await printer.publish({
             print: {
                 command: "set_airduct",
@@ -1592,6 +1601,7 @@ export class BambuImplementation {
             throw new Error("slot_id must be an integer from 0 to 3.");
         }
         const printer = await this.getPrinter(host, serial, token);
+        assertOperationActive();
         await printer.publish({
             print: {
                 command: "ams_get_rfid",
@@ -1717,6 +1727,7 @@ export class BambuImplementation {
         }
         const param = normalizedAction === "start" ? "start_drying" : "stop_drying";
         const printer = await this.getPrinter(host, serial, token);
+        assertOperationActive();
         await printer.publish({
             print: {
                 command: "ams_control",
@@ -1742,6 +1753,7 @@ export class BambuImplementation {
         if (normalizedObjectIds.length === 0) {
             throw new Error("At least one non-negative object id is required.");
         }
+        assertOperationActive();
         await printer.publish({
             print: {
                 sequence_id: "0",
@@ -2324,6 +2336,7 @@ export class BambuImplementation {
             });
             await this.waitForTlsSession(client);
             const absoluteRemote = remotePath.startsWith("/") ? remotePath : `/${remotePath}`;
+            assertOperationActive();
             await client.remove(absoluteRemote);
         }
         finally {
@@ -2361,6 +2374,7 @@ export class BambuImplementation {
             }
             const fileData = await fs.readFile(localPath);
             // Small writes, so a multi-megabyte job on a slow SD card is not mistaken for a stall.
+            assertOperationActive();
             await uploadBytes(client, fileData, absoluteRemote, { onProgress });
         }
         finally {

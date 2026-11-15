@@ -9,3 +9,7 @@ At fork creation the planned direction was signed LAN/cloud X2D controls, self-d
 ## 2026-11-15 — Added opt-in signing and agent discovery
 
 Implemented optional local and cloud signed MQTT controls with independent application and device trust, a persistent shared local counter, fail-closed selection and no automatic replay. The browser-based Bambu account session is an optional cloud credential source; it does not provide the application signing bundle or native file transfer. Preserved the existing `counterpart/1` setup contract and added standalone MCP guide and local-readiness tools and resources instead. The A1 retirement mentioned above is a local deployment decision, not a model-wide removal from this fork. Synthetic and mocked validation does not establish live device or physical-print success.
+
+## 2026-11-15 — Shared stateful HTTP backend
+
+Changed Streamable HTTP to give each client a separate stateful MCP protocol session over one process-owned printer backend. Session deletion no longer tears down shared backend resources; request-bound elicitation and cancellation remain isolated. The earlier stateless option is explicitly unsupported. Added a private-token stdio-to-HTTP relay for clients that cannot connect directly. Local protocol and mocked validation do not establish live printer behavior.

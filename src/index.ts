@@ -22,7 +22,8 @@ function withSlicerReport<T extends { slicer_result?: unknown }>(sliced: T): T &
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { HttpSessions, httpBearerToken } from "./http-sessions.js";
+import { requestOwner, withRequestOwner } from "./request-context.js";
 import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
@@ -38,7 +39,7 @@ import { PRINT_ROUTES, connectionForRoute, ownLocalOf, routeOf, routeOptions, wr
 import fs from "fs";
 import os from "node:os";
 import path from "path";
-import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import {
   STLManipulator,
@@ -1436,7 +1437,7 @@ if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
 
-class BambuPrinterMCPServer {
+export class BambuPrinterMCPServer {
   private server: Server;
   private bambu: BambuImplementation;
   private bambuNetwork: BambuNetworkBridge;
@@ -1448,27 +1449,17 @@ class BambuPrinterMCPServer {
   private readonly fusionSetup = new FusionAddinSetup(() => addinAddress().port, FUSION_MCP_DEFAULT_ARGS, { ...defaultSetupSystem, tmp: TEMP_DIR });
   private stlManipulator: STLManipulator;
   private readonly runtimeConfig: RuntimeConfig;
-  private httpRuntime?: { transport: StreamableHTTPServerTransport; httpServer: HttpServer };
+  private httpRuntime?: HttpSessions;
   private shuttingDown = false;
   private readonly confirmationTimeoutMs = parseConfirmationTimeout(process.env.BAMBU_CONFIRMATION_TIMEOUT_MS);
 
   constructor() {
     this.runtimeConfig = readRuntimeConfig();
-    this.server = new Server(
-      SERVER_INFO,
-      {
-        capabilities: {
-          prompts: {},
-          resources: {},
-          tools: {}
-        },
-        instructions: SERVER_INSTRUCTIONS + PRINT_EVIDENCE_GUIDANCE + AGENT_WORKFLOW_INSTRUCTIONS + (CAD_ENABLED ? " For headless dimensioned designs and parameter edits, read the cad_design prompt before using cad_run." : "")
-      }
-    );
 
     this.bambu = new BambuImplementation(async message => {
       try {
-        const response = await this.server.elicitInput({
+        const { server, signal } = requestOwner();
+        const response = await server.elicitInput({
           mode: "form",
           message,
           requestedSchema: {
@@ -1476,7 +1467,7 @@ class BambuPrinterMCPServer {
             properties: { confirmed: { type: "boolean", title: "I checked the printer and confirm this operation", default: false } },
             required: ["confirmed"],
           },
-        }, { timeout: this.confirmationTimeoutMs });
+        }, { timeout: this.confirmationTimeoutMs, signal });
         if (response.action === "accept" && response.content?.confirmed !== true) {
           throw new Error("Hardware confirmation checkbox was not checked. Check it only after inspecting the printer, or cancel. No command was sent.");
         }
@@ -1494,20 +1485,28 @@ class BambuPrinterMCPServer {
     this.bambuNetwork = new BambuNetworkBridge();
     this.stlManipulator = new STLManipulator(TEMP_DIR);
 
-    this.setupHandlers();
-    this.setupErrorHandling();
+    this.server = this.createProtocolServer();
   }
 
-  setupErrorHandling() {
-    this.server.onerror = (error) => {
-      console.error("[MCP Error]", error);
-    };
-  }
+  /** Protocol peers share this owner's printer, camera, CAD and bridge resources. */
+  private createProtocolServer(): Server {
+    const server = new Server(
+      SERVER_INFO,
+      {
+        capabilities: {
+          prompts: {},
+          resources: {},
+          tools: {}
+        },
+        instructions: SERVER_INSTRUCTIONS + PRINT_EVIDENCE_GUIDANCE + AGENT_WORKFLOW_INSTRUCTIONS + (CAD_ENABLED ? " For headless dimensioned designs and parameter edits, read the cad_design prompt before using cad_run." : "")
+      }
+    );
 
-  setupHandlers() {
-    this.setupResourceHandlers();
-    this.setupPromptHandlers();
-    this.setupToolHandlers();
+    server.onerror = error => { console.error("[MCP Error]", error); };
+    this.setupResourceHandlers(server);
+    this.setupPromptHandlers(server);
+    this.setupToolHandlers(server);
+    return server;
   }
 
   /** The running Blender add-on's get_addon_status, read through this server's Blender bridge (undefined when it has none). */
@@ -1540,7 +1539,8 @@ class BambuPrinterMCPServer {
 
     // No model from args or env — ask the user via elicitation
     try {
-      const result = await this.server.elicitInput({
+      const { server, signal } = requestOwner();
+      const result = await server.elicitInput({
         mode: "form" as const,
         message:
           "Your Bambu Lab printer model is required for safe operation. " +
@@ -1570,7 +1570,7 @@ class BambuPrinterMCPServer {
           },
           required: ["bambu_model"],
         },
-      }, { timeout: this.confirmationTimeoutMs });
+      }, { timeout: this.confirmationTimeoutMs, signal });
 
       if (result.action === "accept" && result.content?.bambu_model) {
         return validateBambuModel(String(result.content.bambu_model));
@@ -2435,11 +2435,11 @@ class BambuPrinterMCPServer {
   }
 
   /** The FDM design guidance as MCP prompts: the client decides when to attach each one. */
-  setupPromptHandlers() {
-    this.server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+  setupPromptHandlers(server: Server) {
+    server.setRequestHandler(ListPromptsRequestSchema, async () => ({
       prompts: [...DESIGN_PROMPTS.filter(p => CAD_ENABLED || p.name !== "cad_design"), FDM_SLICING_PROMPT].map(({ name, title, description }) => ({ name, title, description })),
     }));
-    this.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    server.setRequestHandler(GetPromptRequestSchema, async (request) => {
       if (request.params.name === FDM_SLICING_PROMPT.name) {
         // The slicer slice_stl uses by default, and what it applies there (as counterpart_printer_info reports it).
         const slicerType = normalizeSlicerType(DEFAULT_SLICER_TYPE);
@@ -2457,8 +2457,8 @@ class BambuPrinterMCPServer {
     });
   }
 
-  setupResourceHandlers() {
-    this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  setupResourceHandlers(server: Server) {
+    server.setRequestHandler(ListResourcesRequestSchema, async () => {
       return {
         resources: [
           {
@@ -2504,7 +2504,7 @@ class BambuPrinterMCPServer {
       };
     });
 
-    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       const uri = request.params.uri;
       const guide = getAgentGuideResource(uri);
       if (guide !== undefined) return { contents: [{ uri, mimeType: "text/plain", text: guide }] };
@@ -2561,8 +2561,8 @@ class BambuPrinterMCPServer {
     });
   }
 
-  setupToolHandlers() {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+  setupToolHandlers(server: Server) {
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
           AGENT_READINESS_TOOL,
@@ -3803,7 +3803,8 @@ class BambuPrinterMCPServer {
     });
 
     // A designer's settings extracted for this call are removed when it settles.
-    this.server.setRequestHandler(CallToolRequestSchema, (request, extra) => withPrintDispatch(() => withExtractedSettingsCleanup(async () => {
+    server.setRequestHandler(CallToolRequestSchema, (request, extra) => withRequestOwner(server, extra, () => withPrintDispatch(() => withExtractedSettingsCleanup(async () => {
+      extra.signal.throwIfAborted();
       const { name, arguments: args } = request.params;
       const sendNativeCommand = (
         options: Parameters<typeof sendCommandWithBambuNative>[0],
@@ -5379,7 +5380,7 @@ class BambuPrinterMCPServer {
           isError: true,
         };
       }
-    })));
+    }))));
   }
 
   async startStdio() {
@@ -5392,19 +5393,19 @@ class BambuPrinterMCPServer {
   async shutdown(exitCode = 0) {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    const deadline = setTimeout(() => process.exit(exitCode), 5_000);
+    deadline.unref();
     try {
-      // Close camera sockets/processes and any temporary local login listener.
-      accountManager.cancelInteractiveLogin();
-      this.bambu.cameraStreams.stopAll();
-      // Closing the MCP transport aborts its active requests before exit cleanup.
-      await this.server.close();
-      await this.fusion.close();
-      // The FULU host's container (BAMBU_NETWORK_BRIDGE_IMAGE) is removed with the server, not left running.
-      await this.bambuNetwork.stop();
-      this.httpRuntime?.httpServer.close();
-    } catch (error) {
-      console.error("[MCP Shutdown]", error);
+      // Revoke client requests before cleaning up process-owned resources.
+      const protocol = await Promise.allSettled([this.server.close(), this.httpRuntime?.close()]);
+      const resources = await Promise.allSettled([
+        Promise.resolve().then(() => accountManager.cancelInteractiveLogin()),
+        Promise.resolve().then(() => this.bambu.cameraStreams.stopAll()),
+        this.bambu.disconnectAll(), this.fusion.close(), this.bambuNetwork.stop(),
+      ]);
+      for (const result of [...protocol, ...resources]) if (result.status === "rejected") console.error("[MCP Shutdown]", result.reason);
     } finally {
+      clearTimeout(deadline);
       process.exit(exitCode);
     }
   }
@@ -5413,40 +5414,15 @@ class BambuPrinterMCPServer {
     const { httpHost, httpPort, httpPath, statefulSession, enableJsonResponse, allowedOrigins } =
       this.runtimeConfig;
 
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: statefulSession ? () => randomUUID() : undefined,
-      enableJsonResponse,
-    });
-
-    await this.server.connect(transport);
-
-    const httpServer = createHttpServer(
-      async (req: IncomingMessage, res: ServerResponse) => {
-        const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-        if (url.pathname !== httpPath) {
-          res.writeHead(404);
-          res.end("Not found");
-          return;
-        }
-
-        if (allowedOrigins.size > 0) {
-          const origin = req.headers.origin ?? "";
-          if (origin && !allowedOrigins.has(origin)) {
-            res.writeHead(403);
-            res.end("Forbidden");
-            return;
-          }
-        }
-
-        await transport.handleRequest(req, res);
-      }
-    );
-
-    httpServer.listen(httpPort, httpHost, () => {
-      console.error(`Bambu Printer MCP server running on http://${httpHost}:${httpPort}${httpPath}`);
-    });
-
-    this.httpRuntime = { transport, httpServer };
+    if (!statefulSession) throw new Error("MCP_HTTP_STATEFUL=false is unsupported: parallel HTTP clients require stateful sessions.");
+    this.httpRuntime = new HttpSessions({
+      host: httpHost, port: httpPort, path: httpPath, enableJsonResponse, allowedOrigins,
+      allowedHosts: parseCsvEnv(process.env.MCP_HTTP_ALLOWED_HOSTS), bearerToken: httpBearerToken(),
+    }, () => this.createProtocolServer());
+    await this.httpRuntime.listen();
+    const address = this.httpRuntime.httpServer.address();
+    const port = address && typeof address !== "string" ? address.port : httpPort;
+    console.error(`Bambu Printer MCP server running on http://${httpHost}:${port}${httpPath}`);
   }
 
   async run() {
@@ -5458,7 +5434,10 @@ class BambuPrinterMCPServer {
   }
 }
 
-const server = new BambuPrinterMCPServer();
-process.once("SIGINT", () => { void server.shutdown(130); });
-process.once("SIGTERM", () => { void server.shutdown(143); });
-server.run().catch(console.error);
+// Importing the owner for local protocol tests does not start a second service.
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const server = new BambuPrinterMCPServer();
+  process.once("SIGINT", () => { void server.shutdown(130); });
+  process.once("SIGTERM", () => { void server.shutdown(143); });
+  server.run().catch(error => { console.error("[MCP Startup]", error instanceof Error ? error.message : "Startup failed"); void server.shutdown(1); });
+}
