@@ -17,6 +17,13 @@ import path from "node:path";
 import { trackedMkdtempSync } from "./support/temp.mjs";
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function waitFor(condition, message, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) assert.fail(typeof message === "function" ? message() : message);
+    await wait(10);
+  }
+}
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 async function fixture(t, overrides = {}) {
   const {callTool, ...runtimeOverrides} = overrides;
@@ -47,6 +54,15 @@ async function fixture(t, overrides = {}) {
     }));
     return server;
   });
+  const liveGets = new Map();
+  runtime.httpServer.on("request", (request, response) => {
+    if (request.method !== "GET") return;
+    const id = request.headers["mcp-session-id"];
+    if (typeof id !== "string") return;
+    liveGets.set(id, response);
+    const closed = () => { if (liveGets.get(id) === response) liveGets.delete(id); };
+    response.once("finish", closed); response.once("close", closed);
+  });
   await runtime.listen();
   const url = new URL(`http://127.0.0.1:${runtime.httpServer.address().port}/mcp`);
   const clients = [];
@@ -58,7 +74,7 @@ async function fixture(t, overrides = {}) {
     clients.push({client, transport}); await client.connect(transport);
     return {client, transport};
   }
-  return {runtime, backend, url, connect, count: () => count};
+  return {runtime, backend, url, connect, liveGets, count: () => count};
 }
 
 test("parallel SDK clients own distinct sessions over one backend; deleting A preserves B and permits C", async t => {
@@ -137,18 +153,36 @@ test("Host, default Origin and optional bearer checks reject before parsing a bo
   assert.equal((await fetch(noBrowser.url, {method: "POST", headers: {Origin: "http://localhost"}, body: "not-json"})).status, 403);
 });
 
-test("HTTP limits bodies and session count, expires idle sessions, and closes once", async t => {
-  const f = await fixture(t, {maxSessions: 1, maxBodyBytes: 1024, idleTimeoutMs: 70});
+test("HTTP limits bodies and session count, expires idle sessions, and closes once", {timeout: 20_000}, async t => {
+  // Capacity is checked before expiry can occur, even if initialization is slow.
+  // The separate short-lease runtime below exercises real idle expiry.
+  const f = await fixture(t, {maxSessions: 1, maxBodyBytes: 1024, idleTimeoutMs: 60_000});
   const oversized = await fetch(f.url, {method: "POST", body: "x".repeat(1025)});
   assert.equal(oversized.status, 413); await oversized.text();
   const a = await f.connect("A");
+  const sessionId = a.transport.sessionId, session = f.runtime.sessions.get(sessionId);
+  await waitFor(() => f.liveGets.get(sessionId)?.headersSent && f.runtime.activeRequests === 1 && session.active === 1 && session.requests.size === 0, "A must hold a live GET before checking session capacity");
   const blocked = new Client({name: "overflow", version: "1"});
   await assert.rejects(blocked.connect(new StreamableHTTPClientTransport(f.url)), /503|Session limit/);
   await blocked.close();
   await a.client.close();
-  await wait(170);
-  const c = await f.connect("C"); assert.ok(c.transport.sessionId);
-  const closing = f.runtime.close(); assert.equal(f.runtime.close(), closing); await closing;
+  await waitFor(() => session.active === 0, () => `closed client A still owns ${session.active} active HTTP responses`);
+  await f.runtime.close();
+
+  const idle = await fixture(t, {maxSessions: 1, idleTimeoutMs: 70});
+  async function initialize(name) {
+    // A raw SDK-compatible initialization deliberately creates no background GET
+    // or initialized notification that could race this short idle lease.
+    const response = await fetch(idle.url, {method: "POST", headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream"}, body: JSON.stringify({jsonrpc: "2.0", id: 0, method: "initialize", params: {protocolVersion: "2025-03-26", capabilities: {}, clientInfo: {name, version: "1"}}})});
+    assert.equal(response.status, 200);
+    const id = response.headers.get("mcp-session-id"); assert.ok(id);
+    const initialized = await response.json(); assert.equal(initialized.result.serverInfo.name, "http-fixture");
+    return id;
+  }
+  const expiredId = await initialize("idle-A");
+  await waitFor(() => !idle.runtime.sessions.has(expiredId), "the idle session must actually expire before C initializes");
+  const cId = await initialize("idle-C"); assert.notEqual(cId, expiredId);
+  const closing = idle.runtime.close(); assert.equal(idle.runtime.close(), closing); await closing;
   assert.throws(() => requestOwner(), /No requesting MCP client/);
 });
 
@@ -301,7 +335,8 @@ test("repeated SDK request cancellations finish original POSTs and preserve sess
 
 test("at the live HTTP request ceiling, cancellation and DELETE remain available", {timeout: 15_000}, async t => {
   const f = await fixture(t), a = await f.connect("full-A"), b = await f.connect("full-B");
-  await wait(30);
+  const aId = a.transport.sessionId, bId = b.transport.sessionId;
+  await waitFor(() => f.liveGets.get(aId)?.headersSent && f.liveGets.get(bId)?.headersSent && f.runtime.activeRequests === 2 && [...f.runtime.sessions.values()].every(session => session.active === 1 && session.requests.size === 0), "both clients must have live GET streams and no initialization POSTs before filling capacity");
   const controllers = [], entered = [], releases = [], pending = [];
   const initial = f.runtime.activeRequests;
   for (let index = 0; index < 128 - initial; index++) {
@@ -312,7 +347,7 @@ test("at the live HTTP request ceiling, cancellation and DELETE remain available
   }
   await Promise.all(entered); assert.equal(f.runtime.activeRequests, 128);
   controllers[0].controller.abort(); await controllers[0].cancelled.promise; releases[0].resolve();
-  await wait(20);
+  await waitFor(() => f.runtime.controlRequests === 0 && f.runtime.activeRequests === 127, () => `cancellation must finish its original POST and control reply: active=${f.runtime.activeRequests}, controls=${f.runtime.controlRequests}`);
   assert.equal(f.runtime.controlRequests, 0);
   // Refill the freed slot, then DELETE A at the ceiling without waiting for ordinary requests.
   const id = "full-refill", entry = deferred(), release = deferred();
@@ -320,7 +355,9 @@ test("at the live HTTP request ceiling, cancellation and DELETE remain available
   pending.push(a.client.callTool({name: "owned", arguments: {id, block: true}}).catch(error => error));
   await entry.promise; assert.equal(f.runtime.activeRequests, 128);
   await a.transport.terminateSession(); await a.client.close();
-  releases.forEach(item => item.resolve()); await Promise.all(pending); await wait(30);
+  releases.forEach(item => item.resolve()); await Promise.all(pending);
+  // Client promises can reject before Node emits finish/close on every POST.
+  await waitFor(() => !f.runtime.sessions.has(aId) && f.runtime.activeRequests <= 1 && f.runtime.sessions.get(bId)?.active <= 1, () => `deleted session A must release all HTTP responses: active=${f.runtime.activeRequests}`);
   assert.ok(f.runtime.activeRequests <= 1);
   assert.equal((await b.client.callTool({name: "owned", arguments: {id: "B-after-ceiling"}})).content[0].text, "B-after-ceiling");
   const c = await f.connect("full-C"); assert.ok(c.transport.sessionId);

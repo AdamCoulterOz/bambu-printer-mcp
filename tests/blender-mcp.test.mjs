@@ -33,9 +33,28 @@ async function assertProcessExited(pid) {
 async function start(t, mode = "normal", overrides = {}) {
   const directory = trackedMkdtempSync(path.join(os.tmpdir(), "bambu-blender-test-"));
   const logPath = path.join(directory, "peer.jsonl");
+  const pidPath = path.join(directory, "fixture.pid");
+  const hookPath = path.join(directory, "capture-fixture-pid.mjs");
+  // Capture the actual OS PID in the server immediately after spawn. A child
+  // may be terminated by the startup deadline before its JavaScript runs.
+  if (mode.includes("timeout")) fs.writeFileSync(hookPath, `
+    import childProcess from "node:child_process";
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const original = childProcess.spawn;
+    childProcess.spawn = function(command, args, options) {
+      const child = original.call(this, command, args, options);
+      if (command === process.execPath && args?.[0] === ${JSON.stringify(fixture)} &&
+          args?.[1] === ${JSON.stringify(mode)} && args?.[2] === ${JSON.stringify(logPath)}) {
+        fs.writeFileSync(${JSON.stringify(pidPath)}, String(child.pid));
+      }
+      return child;
+    };
+    syncBuiltinESMExports();
+  `);
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [path.join(root, "dist/index.js")],
+    args: [...(mode.includes("timeout") ? ["--import", hookPath] : []), path.join(root, "dist/index.js")],
     cwd: directory,
     env: {
       ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: "", BAMBU_TOKEN: "printer-secret-do-not-forward",
@@ -52,6 +71,7 @@ async function start(t, mode = "normal", overrides = {}) {
   await client.connect(transport);
   return {
     directory,
+    childPid: () => fs.existsSync(pidPath) ? Number(fs.readFileSync(pidPath, "utf8")) : undefined,
     list: () => client.listTools(),
     events: () => fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [],
     call: (name, args = {}) => client.callTool({ name, arguments: args }, undefined, { timeout: 15000 }),
@@ -113,7 +133,9 @@ test("Blender request deadlines cover startup, discovery and calls without repla
       assert.equal(result.isError, true);
       assert.match(errorText(result), /timed out|timeout/i);
       const events = peer.events();
-      const pid = events.find((event) => event.event === "spawn")?.pid;
+      const pid = peer.childPid();
+      const reportedPid = events.find((event) => event.event === "spawn")?.pid;
+      if (reportedPid !== undefined) assert.equal(reportedPid, pid);
       let exited = false;
       t.after(() => {
         // If the cleanup assertion fails, do not leave its test child behind.
@@ -124,7 +146,11 @@ test("Blender request deadlines cover startup, discovery and calls without repla
       await assertProcessExited(pid);
       exited = true;
       const expectedMethod = mode.startsWith("startup-timeout") ? "initialize" : mode === "list-timeout" ? "tools/list" : "tools/call";
-      assert.ok(events.some((event) => event.method === expectedMethod), `test must reach ${expectedMethod}, not time out in an earlier phase`);
+      // Startup itself may expire before the spawned child handles initialize.
+      // Later phases still require proof that their request reached the child.
+      if (!mode.startsWith("startup-timeout")) {
+        assert.ok(events.some((event) => event.method === expectedMethod), `test must reach ${expectedMethod}, not time out in an earlier phase`);
+      }
       const expectedPhase = mode.startsWith("startup-timeout") ? "initialization" : mode === "list-timeout" ? "tool discovery" : "tool request";
       assert.match(errorText(result), new RegExp(`during ${expectedPhase}`));
       const calls = events.filter((event) => event.method === "tools/call");

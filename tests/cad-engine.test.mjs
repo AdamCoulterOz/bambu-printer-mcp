@@ -268,8 +268,10 @@ test("cad_check_fit waits for the engine like cad_run, and its own timeout ends 
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const model = path.join(root, "model.stl");
   await fs.writeFile(model, "fixture");
-  let release, running = 0, most = 0;
+  let release, markEntered, running = 0, most = 0;
   const held = new Promise((resolve) => (release = resolve));
+  const entered = new Promise((resolve) => (markEntered = resolve));
+  t.after(() => release());
   const engine = new CadEngine({
     dataDir: path.join(root, "data"),
     outputRoots: [root],
@@ -277,6 +279,7 @@ test("cad_check_fit waits for the engine like cad_run, and its own timeout ends 
       platform: "linux",
       run: async () => {
         most = Math.max(most, ++running);
+        markEntered();
         await held;
         running--;
         return { stdout: JSON.stringify({ clear: true }) };
@@ -284,14 +287,22 @@ test("cad_check_fit waits for the engine like cad_run, and its own timeout ends 
     },
   });
   engine.status = async () => ({ configured: true, ready: true, python: "stub", build123d: "0.13.0", platform: "linux" });
-  // four at once, as a design worker sends them: none is refused
-  const checks = [1, 2, 3, 4].map(() => engine.checkFit({ model, reference: model, timeout_ms: 10000 }));
+  // Hold one dispatched check before adding waiters, so the short deadline
+  // exercises the queue regardless of filesystem scheduling.
+  const first = engine.checkFit({ model, reference: model, timeout_ms: 10000 });
+  const checks = [first, ...[1, 2, 3].map(() => engine.checkFit({ model, reference: model, timeout_ms: 10000 }))];
+  const settled = Promise.allSettled(checks);
+  await entered;
   await assert.rejects(
     engine.checkFit({ model, reference: model, timeout_ms: 150 }),
     (e) => e.code === "cad-queue-timeout" && /fit check's timeout expired while waiting/.test(e.message),
   );
   release();
-  const results = await Promise.all(checks);
+  const outcomes = await settled;
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") throw outcome.reason;
+  }
+  const results = outcomes.map((outcome) => outcome.value);
   assert.deepEqual(results.map((r) => r.clear), [true, true, true, true]);
   assert.equal(most, 1, "one operation at a time");
   assert.ok(results.some((r) => r.queue_wait_ms >= 100), JSON.stringify(results.map((r) => r.queue_wait_ms)));
