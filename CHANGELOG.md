@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add opt-in signed local and cloud MQTT controls with operator-provided signing material, independent device trust and an explicitly initialized persistent counter. Fail closed when signing prerequisites are missing; keep native file transfer separate and do not automatically replay uncertain dispatches.
+- Add optional Bambu account login through a temporary loopback browser, local session status and logout, and live bound-printer listing. Account authentication can supply signed cloud credentials; tokens are not returned by the tools.
+- Add `get_agent_guide`, task resources and `get_agent_readiness` for discoverable workflows, configuration metadata and local-only readiness. Existing `counterpart/1` setup fields remain unchanged.
+
+These changes have synthetic, mocked and local MCP protocol coverage; they do not establish live account authentication, device acceptance or physical printing.
+
 ## [1.1.94] – 2026-11-12
 
 ### Added

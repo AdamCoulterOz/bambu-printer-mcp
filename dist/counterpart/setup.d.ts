@@ -136,7 +136,7 @@ export declare const SETUP_FIELDS_OUTPUT_SCHEMA: {
                             properties: {
                                 name: {
                                     type: string;
-                                    enum: ("model" | "host" | "slicer" | "port" | "profiles" | "serial" | "secret" | "slicer-path")[];
+                                    enum: ("model" | "secret" | "slicer" | "host" | "port" | "serial" | "profiles" | "slicer-path")[];
                                 };
                                 env: {
                                     type: string;
@@ -231,7 +231,7 @@ export declare const SETUP_FIELDS_OUTPUT_SCHEMA: {
                         properties: {
                             name: {
                                 type: string;
-                                enum: ("model" | "host" | "slicer" | "port" | "profiles" | "serial" | "secret" | "slicer-path")[];
+                                enum: ("model" | "secret" | "slicer" | "host" | "port" | "serial" | "profiles" | "slicer-path")[];
                             };
                             env: {
                                 type: string;

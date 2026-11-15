@@ -258,7 +258,7 @@ export declare const PRINT_PROGRESS_OUTPUT_SCHEMA: {
         };
         state: {
             type: string;
-            enum: ("failed" | "cancelled" | "idle" | "preparing" | "printing" | "paused" | "finished" | "offline" | "busy")[];
+            enum: ("printing" | "failed" | "cancelled" | "idle" | "preparing" | "paused" | "finished" | "offline" | "busy")[];
         };
         job: {
             type: string;

@@ -8,6 +8,7 @@ import path from 'node:path';
 import JSZip from 'jszip';
 import { STLManipulator } from '../../dist/stl/stl-manipulator.js';
 import { flattenForCli, detectProfilesRoot } from '../../dist/slicer/profile-flatten.js';
+import { normalizeModel } from '../../dist/safety/limits.js';
 
 // Exercise profile preparation and the emitted CLI arguments; never run a real slicer.
 async function fixture(t, slicerType = 'bambustudio') {
@@ -494,7 +495,7 @@ for (const location of ['nested', 'category root']) {
   });
 }
 
-test('installed stock BambuStudio presets keep every default process and filament setting', async t => {
+test('installed stock BambuStudio presets for supported models keep every default process and filament setting', async t => {
   const installed = '/Applications/BambuStudio.app/Contents/Resources/profiles';
   const machineDir = path.join(installed, 'BBL', 'machine');
   const exists = await fs.access(machineDir).then(() => true, () => false);
@@ -503,11 +504,15 @@ test('installed stock BambuStudio presets keep every default process and filamen
   process.env.BAMBU_PROFILES_ROOT = installed;
   process.env.BAMBU_SLICER_PROFILE_DIRS = '';
   const presets = [];
+  const unsupported = new Set();
   for (const file of (await fs.readdir(machineDir)).filter(name => /^Bambu Lab .* nozzle\.json$/.test(name))) {
     const preset = JSON.parse(await fs.readFile(path.join(machineDir, file), 'utf8'));
-    if (preset.instantiation === 'true') presets.push(preset.name);
+    if (preset.instantiation !== 'true') continue;
+    if (normalizeModel(preset.printer_model)) presets.push(preset.name);
+    else unsupported.add(String(preset.printer_model ?? preset.name ?? file));
   }
-  assert.ok(presets.length > 0, 'the installed tree lists stock machine presets');
+  if (unsupported.size) t.diagnostic(`Installed presets outside the server's supported models: ${[...unsupported].sort().join(', ')}`);
+  assert.ok(presets.length > 0, 'the installed tree lists stock presets for supported models');
   const errors = t.mock.method(console, 'error', () => {});
   const manipulator = new STLManipulator(path.join(f.root, 'stock'));
   for (const preset of presets) {

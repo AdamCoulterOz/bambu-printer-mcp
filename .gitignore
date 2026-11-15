@@ -41,6 +41,9 @@ native/*.dSYM/
 !/CLAUDE.md
 !/.claude/agents.md
 !/README.md
+!/CONTEXT.md
+!/INTERFACE.md
+!/HISTORY.md
 !/CHANGELOG.md
 !/CONTRIBUTORS.md
 !/docs/SLICING.md

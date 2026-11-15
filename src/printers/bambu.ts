@@ -1,3 +1,5 @@
+import { signedControlsRequested, resolveSignedControlConfiguration, sendSignedControl } from "../signing-transport.js";
+import type { CommandInput } from "../signing/index.js";
 import {snapshotFrame} from "../counterpart/fresh-frame.js";
 import {FlightRecords,flightKey,type PrintGeometry} from "../counterpart/flight-record.js";
 import {geometryFromGcode,geometryFromFile} from "../counterpart/print-geometry.js";
@@ -1126,6 +1128,7 @@ export class BambuImplementation {
   }
 
   private async print3mfPrepared(host: string, serial: string, token: string, options: BambuPrintOptionsInternal, assertActive: () => void): Promise<any> {
+    const signedConfig = signedControlsRequested(process.env) ? await resolveSignedControlConfiguration(process.env, host, token, serial) : undefined;
     const model = normalizeModel(options.bambuModel);
     if (!model) throw new Error("A supported bambuModel is required before printing.");
     if (!options.filePath.toLowerCase().endsWith(".3mf")) {
@@ -1284,6 +1287,7 @@ export class BambuImplementation {
     }
     const legacyContainer = options.filePath.toLowerCase().endsWith(".gcode.3mf") && !usesH2ProjectFile && !isA1;
     if (legacyContainer) {
+      if (signedControlsRequested(process.env)) throw new Error("Signed MQTT does not support this gcode_file print route. Use a supported project_file route; no upload or print was started.");
       if (options.useAMS !== false || inspection.selectsAms) {
         throw new Error("Legacy .gcode.3mf transport cannot apply verified AMS mappings. Export a .3mf project for AMS printing, or use an external-spool-only job with use_ams:false.");
       }
@@ -1403,9 +1407,28 @@ export class BambuImplementation {
 
     const calibration = directPrintOptionReport(caller, studio, projectFileCmd.print);
     const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive);
-    this.recordFlightDispatch(host,serial,remoteProjectPath,requirements,resumeFile);
-    markPrintCommandSent();
-    try { await printer.publish(projectFileCmd); } catch (error) { watcher.dispose(); throw error; }
+    try {
+      if (signedControlsRequested(process.env)) {
+        if (!signedConfig) throw new Error("Signed control configuration is unavailable.");
+        await sendSignedControl(signedConfig, serial, projectFileCmd.print as CommandInput, undefined, async () => {
+          assertActive();
+          const current = await this.getSafetyStatus(host, serial, token);
+          validatePrinterState(current, requirements);
+          this.assertPrintPreflight(current, preflight);
+          assertActive();
+          this.recordFlightDispatch(host,serial,remoteProjectPath,requirements,resumeFile);
+          markPrintCommandSent();
+        }, assertActive);
+      } else {
+        this.recordFlightDispatch(host,serial,remoteProjectPath,requirements,resumeFile);
+        markPrintCommandSent();
+        await printer.publish(projectFileCmd);
+      }
+    } catch (error) {
+      watcher.dispose();
+      if (signedControlsRequested(process.env)) throw new Error(`The checked file was uploaded, but signed print dispatch failed or is unconfirmed: ${error instanceof Error ? error.message : "signed control error"}. Check printer status and job before retrying.`);
+      throw error;
+    }
     this.recordCheckedJob(host, serial, remoteProjectPath, requirements, resumeFile);
     await new Promise((resolve) => setTimeout(resolve, 300));
     const dispatch = await watcher.settled();
@@ -2054,6 +2077,7 @@ export class BambuImplementation {
   }
 
   private async printRawPrepared(host: string, serial: string, token: string, filePath: string, filename: string, bambuModel: string | undefined, assertActive: () => void) {
+    if (signedControlsRequested(process.env)) throw new Error("Signed MQTT does not support gcode_file printing. No upload or print was started.");
     const model = normalizeModel(bambuModel);
     if (!model) throw new Error("A supported bambuModel is required before printing.");
     const inspection = await inspectPrintFile(filePath, { model });
@@ -2150,6 +2174,7 @@ export class BambuImplementation {
   }
 
   async startJob(host: string, serial: string, token: string, filename: string, bambuModel?: string) {
+    if (signedControlsRequested(process.env)) throw new Error("Signed MQTT does not support gcode_file printing. No file was downloaded or print started.");
     assertDirectPrintSupported(bambuModel, serial);
     if (!normalizeModel(bambuModel)) throw new Error("A supported bambuModel is required before printing.");
     const remotePath = normalizedRemotePath(filename);

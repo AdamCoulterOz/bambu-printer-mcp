@@ -26,7 +26,8 @@
   },
   "bin": {
     "bambu-printer-mcp": "dist/index.js",
-    "bambu-printer-mcp-native-setup": "scripts/setup-bambu-native.mjs"
+    "bambu-printer-mcp-native-setup": "scripts/setup-bambu-native.mjs",
+    "bambu-printer-mcp-signing-setup": "scripts/signing-setup.mjs"
   },
   "files": [
     "dist",
@@ -39,7 +40,9 @@
     "native/*.cpp",
     "native/*.h",
     "scripts/build-bambu-native.sh",
-    "scripts/setup-bambu-native.mjs"
+    "scripts/setup-bambu-native.mjs",
+    "scripts/signing-counter.c",
+    "scripts/signing-setup.mjs"
   ],
   "keywords": [
     "mcp",

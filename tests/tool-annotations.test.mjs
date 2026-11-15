@@ -44,8 +44,8 @@ test('every listed tool declares all four MCP annotation hints, and the table na
 test('annotations match what the tools do to the printer and files', async t => {
   const byName = Object.fromEntries((await listedTools(t)).map(tool => [tool.name, tool.annotations]));
   // The remote read scope is exactly these tools; adding one is a deliberate change here.
-  assert.deepEqual(Object.keys(byName).filter(name => byName[name].readOnlyHint).sort(), ['blender_mcp_status', 'cad_check_fit', 'cad_examples', 'cad_status', 'camera_frame',
-    'counterpart_discover_printers', 'counterpart_print_progress', 'counterpart_print_record', 'counterpart_printer_info', 'counterpart_propose_filaments', 'counterpart_self_check', 'counterpart_setup_fields', 'design_guidance', 'get_printer_filaments', 'get_printer_status', 'get_stl_info',
+  assert.deepEqual(Object.keys(byName).filter(name => byName[name].readOnlyHint).sort(), ['account_list_printers', 'account_status', 'blender_mcp_status', 'cad_check_fit', 'cad_examples', 'cad_status', 'camera_frame',
+    'counterpart_discover_printers', 'counterpart_print_progress', 'counterpart_print_record', 'counterpart_printer_info', 'counterpart_propose_filaments', 'counterpart_self_check', 'counterpart_setup_fields', 'design_guidance', 'get_agent_guide', 'get_agent_readiness', 'get_printer_filaments', 'get_printer_status', 'get_stl_info',
     'inspect_print_file', 'list_3mf_plate_objects', 'list_3mf_plates', 'list_printer_files', 'list_templates', 'resolve_3mf_ams_slots']);
   // Anything that moves, heats, prints or writes is not read-only and reaches the printer.
   for (const name of ['print_3mf', 'print_3mf_bambu_network', 'start_print', 'start_print_job', 'upload_file', 'pause_print', 'resume_print',
@@ -115,6 +115,11 @@ test('every listed tool declares its remote scope, and the arguments its configu
   for (const name of ['print_3mf', 'start_print']) assert.equal(byName[name].scope, 'print', name);
   for (const name of ['pause_print', 'resume_print', 'cancel_print']) assert.equal(byName[name].scope, 'control', name);
   for (const name of ['blender_mcp_call', 'fusion_mcp_call', 'save_template']) assert.equal(byName[name].scope, 'raw', name);
+  assert.equal(byName.get_agent_readiness.scope, 'read');
+  assert.equal(byName.get_agent_guide.scope, 'read');
+  for (const name of ['account_status', 'account_login', 'account_cancel_login', 'account_list_printers', 'account_logout']) assert.equal(byName[name].scope, 'raw', name);
+  assert.equal(byName.account_login.arguments.region, 'config');
+  assert.equal(CONFIG_ARGUMENTS.has('region'), false, 'geometry region is not globally classified as config');
   // Another server's tool arguments may carry anything: configuration names inside them are declared too.
   assert.equal(byName.blender_mcp_call.arguments.password, 'config');
   assert.deepEqual(byName.fusion_mcp_status.raisedBy, { launch: 'design' });

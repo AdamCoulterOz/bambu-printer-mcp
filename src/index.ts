@@ -4,6 +4,9 @@ import {flightKey} from "./counterpart/flight-record.js";
 import {FLIGHT_RECORD_PROPERTIES,FLIGHT_RECORD_DESCRIPTION,FLIGHT_RECORD_OUTPUT_SCHEMA,flightReadOptions,flightRecordResult,FLIGHT_ASSESS_PROPERTIES,FLIGHT_ASSESS_REQUIRED,FLIGHT_ASSESS_DESCRIPTION,PRINT_EVIDENCE_GUIDANCE,visualSubmission} from "./counterpart/flight-tools.js";
 import {CAMERA_STREAM_TOOLS} from "./printers/camera-tools.js";
 import { withAnnotations } from "./tool-annotations.js";
+import { resolveSignedControlConfiguration, signedControlConfiguration, SignedTransport, sendSignedControl, sendTypedLight, signedControlsRequested, accountManager } from "./signing-transport.js";
+import type { CommandInput } from "./signing/index.js";
+import { AGENT_WORKFLOW_INSTRUCTIONS, AGENT_WORKFLOW_RESOURCE, AGENT_WORKFLOW_URI, AGENT_WORKFLOW_TEXT, AGENT_READINESS_TOOL, getAgentReadiness, AGENT_GUIDE_RESOURCES, getAgentGuideResource, AGENT_GUIDE_TOOL, getAgentGuide } from "./agent-workflow.js";
 import { withRemote } from "./counterpart/remote.js";
 import { refusalReport, slicedFileFacts, slicerReport } from "./counterpart/sliced-file.js";
 import { listModelPlates } from "./counterpart/model-plates.js";
@@ -103,6 +106,32 @@ const DEFAULT_BAMBU_SERIAL = process.env.BAMBU_PRINTER_SERIAL || process.env.BAM
 const DEFAULT_BAMBU_TOKEN =
   process.env.BAMBU_PRINTER_ACCESS_TOKEN || process.env.BAMBU_TOKEN || "";
 const DEFAULT_BAMBU_DEV_ID = process.env.BAMBU_DEV_ID || DEFAULT_BAMBU_SERIAL;
+/** Configuration shape only: never load keys, sessions, files, or network state. */
+function signedReadinessContext(): { signedControlsSelected: boolean; signedConfigurationValid?: boolean } {
+  const selected = signedControlsRequested(process.env);
+  if (!selected) return { signedControlsSelected: false };
+  try {
+    const env = process.env;
+    let candidate: NodeJS.ProcessEnv = env;
+    let accountUnchecked = false;
+    if (env.BAMBU_SIGNED_WRITE_TRANSPORT?.trim() === "cloud") {
+      const count = [env.BAMBU_SIGNED_CLOUD_BROKER?.trim(), env.BAMBU_SIGNED_CLOUD_USERNAME?.trim(), env.BAMBU_SIGNED_CLOUD_TOKEN].filter(Boolean).length;
+      if (count > 0 && count < 3) throw new Error("Incomplete cloud configuration.");
+      if (count === 0 && env.BAMBU_SIGNED_CLOUD_AUTH?.trim() === "account") {
+        accountUnchecked = true;
+        candidate = { ...env, BAMBU_SIGNED_CLOUD_BROKER: "mqtts://placeholder.invalid", BAMBU_SIGNED_CLOUD_USERNAME: "placeholder", BAMBU_SIGNED_CLOUD_TOKEN: "placeholder" };
+      }
+    }
+    const configuredHost = process.env.BAMBU_PRINTER_HOST || process.env.PRINTER_HOST || "";
+    const config = signedControlConfiguration(candidate, configuredHost, DEFAULT_BAMBU_TOKEN);
+    if (!config) throw new Error("Missing signed configuration.");
+    // Constructor validates endpoint syntax without opening a connection or loading credentials.
+    new SignedTransport({ serial: "READINESS", url: config.url, username: config.username, password: config.password, sessionFactory: async () => { throw new Error("Readiness never opens a session."); } });
+    return { signedControlsSelected: true, signedConfigurationValid: accountUnchecked ? undefined : true };
+  } catch {
+    return { signedControlsSelected: true, signedConfigurationValid: false };
+  }
+}
 // os.tmpdir(), not process.cwd() — a packaged Claude Desktop extension is
 // spawned with a cwd we don't control (and may not be writable), so a
 // cwd-relative default here can throw at module load via the mkdirSync
@@ -161,7 +190,7 @@ const SERVER_INFO = {
 };
 /** Tools that declare an outputSchema: they always return structuredContent, and errors carry none. */
 const OUTPUT_SCHEMA_TOOLS = new Set([
-  "cad_status", "cad_setup", "cad_run", "cad_check_fit", "cad_examples",
+  "get_agent_readiness", "get_agent_guide", "cad_status", "cad_setup", "cad_run", "cad_check_fit", "cad_examples",
   "counterpart_printer_info", "counterpart_self_check", "counterpart_print_progress", "counterpart_make_3mf",
   "counterpart_discover_printers", "counterpart_setup_fields", "counterpart_propose_filaments",
   "fusion_mcp_status", "fusion_mcp_new_design", "fusion_mcp_export",
@@ -1433,7 +1462,7 @@ class BambuPrinterMCPServer {
           resources: {},
           tools: {}
         },
-        instructions: SERVER_INSTRUCTIONS + PRINT_EVIDENCE_GUIDANCE + (CAD_ENABLED ? " For headless dimensioned designs and parameter edits, read the cad_design prompt before using cad_run." : "")
+        instructions: SERVER_INSTRUCTIONS + PRINT_EVIDENCE_GUIDANCE + AGENT_WORKFLOW_INSTRUCTIONS + (CAD_ENABLED ? " For headless dimensioned designs and parameter edits, read the cad_design prompt before using cad_run." : "")
       }
     );
 
@@ -2451,7 +2480,9 @@ class BambuPrinterMCPServer {
             description: "HMS and error-related fields from the latest printer status"
           },
           FDM_CAPABILITY_RESOURCE,
-          FDM_FIT_RESOURCE
+          FDM_FIT_RESOURCE,
+          AGENT_WORKFLOW_RESOURCE,
+          ...AGENT_GUIDE_RESOURCES
         ],
         templates: [
           {
@@ -2475,6 +2506,11 @@ class BambuPrinterMCPServer {
 
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       const uri = request.params.uri;
+      const guide = getAgentGuideResource(uri);
+      if (guide !== undefined) return { contents: [{ uri, mimeType: "text/plain", text: guide }] };
+      if (uri === AGENT_WORKFLOW_URI) {
+        return { contents: [{ uri, mimeType: AGENT_WORKFLOW_RESOURCE.mimeType, text: AGENT_WORKFLOW_TEXT }] };
+      }
       if (uri === FDM_CAPABILITY_URI) {
         return { contents: [{ uri, mimeType: FDM_CAPABILITY_RESOURCE.mimeType, text: FDM_CAPABILITY_GUIDANCE }] };
       }
@@ -2529,6 +2565,13 @@ class BambuPrinterMCPServer {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
+          AGENT_READINESS_TOOL,
+          AGENT_GUIDE_TOOL,
+          { name: "account_status", description: "Report whether a private cached Bambu account session exists; ready does not mean it was validated online.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+          { name: "account_login", description: "Start a short-lived local browser login; credentials and verification codes are entered only in that browser.", inputSchema: { type: "object", properties: { region: { type: "string", enum: ["global", "china"], description: "The Bambu account region." } }, required: ["region"], additionalProperties: false } },
+          { name: "account_cancel_login", description: "Cancel the pending local browser login.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+          { name: "account_list_printers", description: "List printer names, models and serials bound to the cached Bambu account; contacts Bambu.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+          { name: "account_logout", description: "Cancel login and remove the private local cached account session; does not revoke a remote session.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
           {
             name: "get_printer_status",
             description: "Get the current status of the Bambu Lab printer",
@@ -2914,12 +2957,12 @@ class BambuPrinterMCPServer {
           },
           {
             name: "bambu_network_call",
-            description: "Call a raw FULU OrcaSlicer-bambulab BambuNetwork bridge method, optionally with an initialized network agent injected into the payload.",
+            description: "Call one of six allowlisted read-only FULU BambuNetwork bridge methods. Arbitrary mutations and printer commands are unavailable, including as a signed-control bypass. Optional agent initialization may occur.",
             inputSchema: {
               type: "object",
               properties: {
-                method: { type: "string", description: "FULU bridge method name, for example bridge.handshake, net.is_user_login, or net.get_user_selected_machine." },
-                payload: { type: "object", description: "JSON payload passed to the bridge method." },
+                method: { type: "string", description: "Allowed methods: bridge.handshake, net.is_user_login, net.get_user_id, net.get_user_name, net.get_user_avatar, net.get_user_nickanme." },
+                payload: { type: "object", description: "JSON payload for the selected allowlisted method; it cannot enable arbitrary bridge commands." },
                 with_agent: { type: "boolean", description: "When true, initialize a BambuNetwork agent and add its agent id to the payload before calling the method." },
                 bridge_command: { type: "string", description: "Override command for the FULU bridge host or macOS/WSL wrapper; defaults to BAMBU_NETWORK_BRIDGE_COMMAND. Per-call overrides require MCP_ALLOW_EXECUTABLE_ARG=1." },
                 bambu_network_config_dir: { type: "string", description: "Config/log directory used by the BambuNetwork agent; defaults to BAMBU_NETWORK_CONFIG_DIR or a user config directory." },
@@ -3765,7 +3808,18 @@ class BambuPrinterMCPServer {
       const sendNativeCommand = (
         options: Parameters<typeof sendCommandWithBambuNative>[0],
         execution: Parameters<typeof sendCommandWithBambuNative>[1] = {}
-      ) => sendCommandWithBambuNative(options, { signal: extra.signal, ...execution });
+      ) => {
+        if (!signedRequested()) return sendCommandWithBambuNative(options, { signal: extra.signal, ...execution });
+        if (name === "x2d_native_control") throw new Error("Raw native commands are unavailable while signed controls are selected.");
+        const message = JSON.parse(options.messageJson) as { print?: Record<string, unknown> };
+        const command = message.print;
+        const allowed = new Set(["stop", "pause", "resume", "clean_print_error", "print_speed", "set_airduct", "ams_get_rfid", "ams_control", "skip_objects", "gcode_line"]);
+        if (!command || typeof command.command !== "string" || !allowed.has(command.command)) throw new Error("This control is not supported by the selected signed route.");
+        return resolveSignedControlConfiguration(process.env, options.host, options.token, options.serial).then(config => {
+          if (!config) throw new Error("Signed control configuration is unavailable.");
+          return sendSignedControl(config, options.serial, command as CommandInput, execution.signal ?? extra.signal, execution.beforeDispatch, execution.assertActive);
+        }).then(() => ({ status: "success", message: "Signed command acknowledged by the MQTT broker. Check printer status for the outcome." }));
+      };
 
       const progressToken = extra._meta?.progressToken;
       let progressNotifications = Promise.resolve();
@@ -3815,7 +3869,8 @@ class BambuPrinterMCPServer {
       let nativeUnavailable: string | null | undefined;
       const nativeUnavailableReason = () =>
         (nativeUnavailable ??= x2dTarget ? bambuNativeUnavailableReason() ?? null : "The selected printer is not an X2D.");
-      const nativeControls = () => nativeUnavailableReason() === null;
+      const signedRequested = () => signedControlsRequested(process.env);
+      const nativeControls = () => signedRequested() || nativeUnavailableReason() === null;
       // Linux sent X2D stop and heater-off over MQTT before the native route
       // existed. Send them over both routes there: a stuck helper must not
       // delay an emergency control, and a repeated stop or heater-off is
@@ -3832,6 +3887,7 @@ class BambuPrinterMCPServer {
           command === "resume" ? { signal: extra.signal, assertActive, beforeDispatch } : undefined);
         // The selected route decides first: a job started over FULU's bridge (LAN or cloud) is controlled there,
         // even on an X2D whose native plug-in is installed. Otherwise an X2D uses its native route when it can.
+        if (signedRequested()) return nativeCommand;
         const route = resolveConnection(args);
         if (route.mode !== "bambu_network" && nativeControls()) {
           return command === "stop"
@@ -3925,6 +3981,39 @@ class BambuPrinterMCPServer {
             });
             break;
           }
+          case "account_status":
+            if (args && Object.keys(args).length) throw new Error("account_status does not accept arguments.");
+            result = { ...await accountManager.status(), liveValidated: false, note: "Ready means a cached session exists and is not known to be expired; it has not been validated online." };
+            break;
+          case "account_login": {
+            if (!args || Object.keys(args).some(key => key !== "region") || (args.region !== "global" && args.region !== "china")) throw new Error("account_login requires only region: global or china.");
+            const login = await accountManager.beginInteractiveLogin({region: args.region});
+            result = { url: login.url, expiresAt: login.expiresAt, note: "Open this temporary local URL in a browser to sign in. Enter credentials and verification codes only there." };
+            break;
+          }
+          case "account_cancel_login":
+            if (args && Object.keys(args).length) throw new Error("account_cancel_login does not accept arguments.");
+            accountManager.cancelInteractiveLogin(); result = { status: "cancelled" }; break;
+          case "account_list_printers":
+            if (args && Object.keys(args).length) throw new Error("account_list_printers does not accept arguments.");
+            result = { printers: await accountManager.listPrinters() }; break;
+          case "account_logout":
+            if (args && Object.keys(args).length) throw new Error("account_logout does not accept arguments.");
+            await accountManager.logout(); result = { status: "logged_out", remote_revoked: false }; break;
+          case "get_agent_guide":
+            if (args && Object.keys(args).some(key => key !== "topic")) throw new Error("get_agent_guide accepts only topic.");
+            result = getAgentGuide(args?.topic);
+            break;
+          case "get_agent_readiness":
+            if (args && Object.keys(args).length) throw new Error("get_agent_readiness does not accept arguments.");
+            result = getAgentReadiness({
+              printerHostConfigured: Boolean(process.env.BAMBU_PRINTER_HOST || process.env.PRINTER_HOST),
+              printerSerialConfigured: Boolean(DEFAULT_BAMBU_SERIAL),
+              printerTokenConfigured: Boolean(DEFAULT_BAMBU_TOKEN),
+              printerModelConfigured: Boolean(DEFAULT_BAMBU_MODEL),
+              ...signedReadinessContext(),
+            });
+            break;
           case "get_printer_status":
             result = await this.bambu.getStatus(host, bambuSerial, bambuToken);
             break;
@@ -4173,6 +4262,7 @@ class BambuPrinterMCPServer {
             break;
 
           case "x2d_native_control": {
+            if (signedRequested()) throw new Error("Raw native commands are unavailable while signed controls are selected.");
             if (!args?.message_json) {
               throw new Error("Missing required parameter: message_json");
             }
@@ -4196,7 +4286,7 @@ class BambuPrinterMCPServer {
             result = await this.bambu.clearHmsErrors(host, bambuSerial, bambuToken,
               nativeControls()
                 ? (assertActive, beforeDispatch) => sendNativeCommand({ host, serial: bambuSerial, token: bambuToken,
-                    messageJson: JSON.stringify({ print: { command: "clean_print_error", param: "", sequence_id: String(Date.now()) } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
+                    messageJson: JSON.stringify({ print: { command: "clean_print_error", sequence_id: String(Date.now()) } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
                 : undefined);
             break;
 
@@ -4261,7 +4351,7 @@ class BambuPrinterMCPServer {
             if (nativeControls()) {
               const amsId = Number(args.ams_id);
               const slotId = Number(args.slot_id);
-              if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
+              if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && !(amsId === 128 && x2dTarget)) {
                 throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
               }
               if (!Number.isInteger(slotId) || slotId < 0 || slotId > 3 || (amsId === 128 && slotId !== 0)) {
@@ -4307,11 +4397,12 @@ class BambuPrinterMCPServer {
               heaterModel || undefined,
               args?.material !== undefined ? String(args.material) : undefined,
               Number(args?.nozzle_diameter ?? DEFAULT_NOZZLE_DIAMETER),
-              (args.temperature === 0 ? nativeControls() : heaterModel === "x2d" && bambuNativeControlsAvailable())
+              (signedRequested() || (args.temperature === 0 ? nativeControls() : heaterModel === "x2d" && bambuNativeControlsAvailable()))
                 ? (heater, target, assertActive, beforeDispatch) => {
+                    const signedGcode = `${heater === "bed" ? "M140" : "M104"}${heater === "nozzle" && target > 0 ? " T0" : ""} S${target}\n`;
                     const native = () => sendNativeCommand({ host, serial: bambuSerial, token: bambuToken,
-                      messageJson: buildBambuNativeTemperatureCommand(heater, target).messageJson }, { signal: extra.signal, assertActive, beforeDispatch });
-                    return target === 0
+                      messageJson: signedRequested() ? JSON.stringify({ print: { command: "gcode_line", param: signedGcode } }) : buildBambuNativeTemperatureCommand(heater, target).messageJson }, { signal: extra.signal, assertActive, beforeDispatch });
+                    return target === 0 && !signedRequested()
                       ? linuxEmergency(native, signal => this.bambu.sendHeaterOffOverMqtt(host, bambuSerial, bambuToken, heater, signal))()
                       : native();
                   }
@@ -4325,23 +4416,27 @@ class BambuPrinterMCPServer {
               throw new Error("Missing required parameters: fan and speed");
             }
             if (nativeControls()) {
-              const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
-              const printerState = String(status?.raw?.gcode_state ?? status?.raw?.print?.gcode_state ?? status?.gcode_state ?? status?.status ?? "").toUpperCase();
-              if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
-                throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
+              if (x2dTarget) {
+                const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
+                const printerState = String(status?.raw?.gcode_state ?? status?.raw?.print?.gcode_state ?? status?.gcode_state ?? status?.status ?? "").toUpperCase();
+                if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
+                  throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
+                }
               }
               const fanCommand = buildBambuNativeFanCommand(String(args.fan), Number(args.speed));
+              if (signedRequested() && !x2dTarget && fanCommand.fanIndex === 10) throw new Error("Right auxiliary fan control requires a selected X2D.");
+              const signedSpeed = x2dTarget ? fanCommand.speed : Math.round(Number(args.speed));
               result = {
                 ...await sendNativeCommand({
                   host,
                   serial: bambuSerial,
                   token: bambuToken,
-                  messageJson: fanCommand.messageJson,
+                  messageJson: signedRequested() ? JSON.stringify({ print: { command: "gcode_line", param: `M106 P${fanCommand.fanIndex} S${signedSpeed * 255 / 100}\n` } }) : fanCommand.messageJson,
                 }),
                 fan: fanCommand.fan,
                 fan_index: fanCommand.fanIndex,
                 requested_speed: fanCommand.requestedSpeed,
-                speed: fanCommand.speed,
+                speed: signedRequested() ? signedSpeed : fanCommand.speed,
               };
             } else {
               result = await this.bambu.setFanSpeed(
@@ -4366,6 +4461,13 @@ class BambuPrinterMCPServer {
               }
               if (!["on", "off", "flashing"].includes(mode)) {
                 throw new Error("Light mode must be one of: on, off, flashing.");
+              }
+              if (signedRequested()) {
+                const config = await resolveSignedControlConfiguration(process.env, host, bambuToken, bambuSerial);
+                if (!config) throw new Error("Signed control configuration is unavailable.");
+                await sendTypedLight(config, bambuSerial, light, mode, extra.signal);
+                result = {status: "success", message: "Typed light command acknowledged by the selected MQTT broker; check printer status for the outcome.", light, mode};
+                break;
               }
               result = await sendNativeCommand({
                 host,
@@ -4433,7 +4535,7 @@ class BambuPrinterMCPServer {
               if (action !== "start" && action !== "stop") {
                 throw new Error("AMS drying action must be one of: start, stop.");
               }
-              if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
+              if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && !(amsId === 128 && x2dTarget)) {
                 throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
               }
               result = await sendNativeCommand({
@@ -5291,7 +5393,8 @@ class BambuPrinterMCPServer {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     try {
-      // Close camera sockets/processes first, waking any waiting frame requests.
+      // Close camera sockets/processes and any temporary local login listener.
+      accountManager.cancelInteractiveLogin();
       this.bambu.cameraStreams.stopAll();
       // Closing the MCP transport aborts its active requests before exit cleanup.
       await this.server.close();

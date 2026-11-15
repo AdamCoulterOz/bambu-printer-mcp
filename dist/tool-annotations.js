@@ -37,6 +37,13 @@ export const TOOL_ANNOTATIONS = {
     // Writes save_path, overwriting an existing file there; every call takes a new frame.
     camera_snapshot: hints(false, true, false, true),
     // Local reads
+    account_status: READ_LOCAL, // reads only the private local account-session state
+    account_list_printers: READ_OUTSIDE, // reads Bambu's live account API
+    account_login: hints(false, false, false, true), // starts a temporary browser login and can contact Bambu
+    account_cancel_login: hints(false, false, true, false), // closes the pending local login
+    account_logout: hints(false, true, true, false), // deletes the local account session, not the remote session
+    get_agent_guide: READ_LOCAL, // static guidance; no configuration, file or network reads
+    get_agent_readiness: READ_LOCAL, // supplied configuration flags only; no printer or filesystem probes
     inspect_print_file: READ_LOCAL,
     list_3mf_plate_objects: READ_LOCAL,
     list_3mf_plates: READ_LOCAL,

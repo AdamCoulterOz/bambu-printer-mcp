@@ -1,6 +1,8 @@
 export const REMOTE_META_KEY = "counterpart/remote";
 export const REMOTE_SCOPES = {
     // read
+    get_agent_readiness: "read",
+    get_agent_guide: "read",
     counterpart_discover_printers: "read",
     counterpart_setup_fields: "read",
     counterpart_propose_filaments: "read",
@@ -69,7 +71,12 @@ export const REMOTE_SCOPES = {
     print_collar_charm: "print",
     merge_vertices: "print",
     center_model: "print",
-    // raw
+    // raw: account administration and account-wide discovery are server-global.
+    account_status: "raw",
+    account_login: "raw",
+    account_cancel_login: "raw",
+    account_list_printers: "raw",
+    account_logout: "raw",
     save_template: "raw",
     bambu_network_call: "raw",
     upload_gcode: "raw",
@@ -102,6 +109,8 @@ const TOP_LEVEL_CONFIG = new Set(["type"]);
 const FILE_ARGUMENTS = new Set(["filament_profile", "slicer_profile", "load_filaments", "source_f3d"]);
 const isPath = (key) => /(?:path|dir|directory|_file)$/.test(key) || FILE_ARGUMENTS.has(key);
 function kindOf(tool, key, depth) {
+    if (tool === "account_login" && depth === 0 && key === "region")
+        return "config";
     if (tool === "cad_check_fit" && depth === 0 && ["model", "reference"].includes(key))
         return "path";
     // counterpart_print_route's own `route` is the connection the caller chooses.

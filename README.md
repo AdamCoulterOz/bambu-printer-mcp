@@ -64,6 +64,8 @@ worked and whether I need to restart or reload the harness.
 
 [Setup reference](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/SETUP.md) · [FULU guide](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/FULU.md) · [Optional code mode](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/SETUP.md#optional-code-mode)
 
+Once the server is installed and configured in your MCP client, its initialize instructions point to `get_agent_guide` and `bambu://workflow/index`, with focused guides for setup, optional account login and signed controls, status, camera, design, slicing, dispatch, and controls. `get_agent_guide` serves the same guides to tools-only clients. The `bambu://workflow/printing` resource describes the printing workflow; the current tool schemas provide arguments and model-specific limits. `get_agent_readiness` summarizes known local configuration and capability prerequisites without contacting a printer; missing defaults can also be supplied to individual calls. It does not establish printer or physical readiness, inspect a file, or authorize dispatch. Use `counterpart_setup_fields` for setup fields and the existing print tools for their live safety checks. Initial installation and client configuration still happen outside MCP.
+
 ## What to ask your agent
 
 Ask for the result you want, not the steps. Current models plan across tools: they search the web, read photos, look up exact dimensions, edit models, slice, and print. Expect a question or two when a choice matters, such as which filament to use or whether to start the print.
