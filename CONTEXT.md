@@ -8,7 +8,7 @@ Stateful Streamable HTTP serves separate client protocol sessions from one share
 
 Optional signed MQTT control supports explicitly selected local and cloud routes. It uses operator-supplied application signing material, independently configured device trust and a durable local counter. The account integration is separately opt-in; its browser flow provides a private cached session for the optional cloud route. Native SDK/FULU sessions remain separate from account login and signing. The candidate explicit signed_mqtt route combines independently verified direct internal-storage 3MF transfer with the existing signer; signing itself is not file transfer. Route and model support are not universal.
 
-The new signed_mqtt route is not deployed or live-qualified. Focused synthetic and MCP fixtures cover the candidate; the private native SDK -26 readiness refusal is a separate gate, not evidence that the recovered application signing keys are invalid. Four Scan-to-Make client audits remain required before an upstream PR; the user-approved private deployment exception is not a release.
+The signed_mqtt route has been privately deployed and exercised on one X2D: an upload-only request completed with matching full readback, and a subsequent signed-cloud print reached FINISH on firmware 01.02.00.00; camera images showed first-layer deposition and the completed fixture on the plate. Hands-on physical quality and fit remain unverified; other models and firmware are unqualified. Focused synthetic and MCP fixtures also cover the candidate; the private native SDK -26 readiness refusal is a separate gate, not evidence that the recovered application signing keys are invalid. Four Scan-to-Make client audits remain required before an upstream PR; the user-approved private deployment exception is not a release.
 
 Agent guidance is available from initialization instructions, `get_agent_guide` and `bambu://workflow/` resources. `get_agent_readiness` reports only known local configuration and capabilities; unknown remains unknown. The existing `counterpart/1` setup schema is unchanged.
 
@@ -16,7 +16,7 @@ Agent guidance is available from initialization instructions, `get_agent_guide` 
 
 An in-memory MQTT fixture reproduced a 2-second transport deadline expiring before a 2.5-second CONNACK; the transport deadline now matches the 10-second connection bound. This reproduces a failure mechanism, not proof of the cause of the private print attempt. Native/bridge print preflight exposes sanitized connection diagnostics and identifies the initial or confirmation safety stage without retrying.
 
-Native-print safety collection and helper execution have bounded deadlines. Expired requests cannot authorize a late dispatch, and helper errors retain allowlisted diagnostics. The native-helper deadline is not an end-to-end limit on slicing or inspection. Focused fixtures and independent review cover the repair; physical printing remains unqualified.
+Native-print safety collection and helper execution have bounded deadlines. Expired requests cannot authorize a late dispatch, and helper errors retain allowlisted diagnostics. The native-helper deadline is not an end-to-end limit on slicing or inspection. Focused fixtures and independent review cover the repair; native physical printing remains unqualified.
 
 ## Invariants
 
