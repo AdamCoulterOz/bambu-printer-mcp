@@ -10,7 +10,9 @@ The optional `account_login` tool starts a short-lived loopback browser flow for
 
 For signed cloud MQTT, `BAMBU_SIGNED_CLOUD_AUTH=account` opts into the account session. A complete explicitly configured broker, username and token take precedence; partial explicit credentials fail and are never combined with the account session. The server verifies the selected printer is bound to the account before using its session. This account login is separate from the application PEM signing bundle and from native helper or FULU sessions; signing does not upload a file.
 
-Signed MQTT controls are optional and separate from file transfer. Read `get_agent_guide` with topic `signing` for prerequisites, trust boundaries, configuration and recovery; The signing guide also lists the optional setting names without their values. Enable with `BAMBU_SIGNED_CONTROLS=true` and select `BAMBU_SIGNED_WRITE_TRANSPORT=local` or `cloud`. Supply absolute `BAMBU_SIGNING_DIR`, `BAMBU_SIGNING_DEVICE_CA_FILE` and `BAMBU_SIGNING_STATE_DIR`. The signing directory needs the operator-provided `slicer_key.pem`, `slicer_cert.pem` and `slicer_crl.pem`: keep the private key private, provide the full certificate chain and a fresh CRL. The fixed application CA pin, device attestation CA, and optional local broker TLS CA are distinct trust boundaries. OpenSSL 3 and a POSIX C compiler are required.
+Choose the route before changing printer modes. Preserve the person’s existing cloud and Bambu Handy preference; enabling LAN Only disconnects cloud access. Legacy unsigned LAN, opt-in signed local/cloud and native routes have different model- and firmware-specific prerequisites. Do not assume signed or native support works on every device.
+
+Signed MQTT controls are optional and separate from file transfer. Read `get_agent_guide` with topic `signing` for prerequisites, trust boundaries, configuration and recovery; the signing guide also lists the optional setting names without their values. Enable with `BAMBU_SIGNED_CONTROLS=true` and select `BAMBU_SIGNED_WRITE_TRANSPORT=local` or `cloud`. Supply absolute `BAMBU_SIGNING_DIR`, `BAMBU_SIGNING_DEVICE_CA_FILE` and `BAMBU_SIGNING_STATE_DIR`. The signing directory needs the operator-provided `slicer_key.pem`, `slicer_cert.pem` and `slicer_crl.pem`: keep the private key private, provide the full certificate chain and a fresh CRL. The fixed application CA pin, device attestation CA, and optional local broker TLS CA are distinct trust boundaries. OpenSSL 3 and a POSIX C compiler are required.
 
 Initialize the private state directory with `bambu-printer-mcp-signing-setup <absolute-private-state-directory>`. For a missing helper, `bambu-printer-mcp-signing-setup --repair <existing-private-state-directory>` rebuilds it without resetting the counter. Preserve counter state: coordination covers only processes sharing that directory, not other hosts or applications. Optional local broker trust uses `BAMBU_SIGNED_LOCAL_TLS_CA_FILE` and `BAMBU_SIGNED_LOCAL_TLS_SERVERNAME`. Cloud uses `BAMBU_SIGNED_CLOUD_BROKER`, `BAMBU_SIGNED_CLOUD_USERNAME` and `BAMBU_SIGNED_CLOUD_TOKEN` together, or the account option above; never mix partial explicit credentials with an account session. See `.env.example` for the names. Missing prerequisites block the signed route; there is no automatic plaintext fallback or replay. Successful configuration does not prove a live session or physical printing.
 
@@ -240,9 +242,9 @@ Use the harness's built-in code mode or equivalent when available. Otherwise, su
 
 ## Enabling Developer Mode for direct LAN
 
-The default `lan_mqtt_ftps` path connects to the printer locally. Enable **LAN Only Mode** and, on firmware with authorization controls, **Developer Mode** to allow third-party commands. Older firmware may expose the LAN interfaces without a separate Developer Mode toggle. Follow the model-specific [LAN setup](https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode) and [Developer Mode instructions](https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode); firmware and menu names vary.
+For the legacy unsigned `lan_mqtt_ftps` path, the following steps describe LAN Only and, where offered, Developer Mode setup. Choose that route with the person before changing modes: LAN Only disconnects cloud and Handy. Signed local/cloud and native routes have separate prerequisites and should not automatically trigger these steps. Older firmware may expose the LAN interfaces without a separate Developer Mode toggle. Follow the model-specific [LAN setup](https://wiki.bambulab.com/en/knowledge-sharing/enable-lan-mode) and [Developer Mode instructions](https://wiki.bambulab.com/en/knowledge-sharing/enable-developer-mode); firmware and menu names vary.
 
-Bambu describes Developer Mode as the route for custom local integrations in its [third-party integration update](https://blog.bambulab.com/updates-and-third-party-integration-with-bambu-connect/). A Bambu Cloud login is not a credential required by this MCP's direct LAN path. The optional [FULU cloud bridge](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/FULU.md#cloud-authentication) has separate authentication requirements.
+Bambu describes Developer Mode as the route for custom local integrations in its [third-party integration update](https://blog.bambulab.com/updates-and-third-party-integration-with-bambu-connect/). A Bambu Cloud login is not required for the legacy direct LAN path. The optional [FULU cloud bridge](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/FULU.md#cloud-authentication) has separate authentication requirements.
 
 H2-series status may arrive through `push_status` without answering the legacy `get_version` handshake. This fork accepts the live status stream; receiving status alone does not confirm permission to start a print.
 
@@ -256,13 +258,13 @@ On the printer's touchscreen, go to **Settings**, then select the **Network** (W
 
 ### Step 2: Enable LAN Only Mode
 
-Toggle **LAN Only Mode** to **ON**. This enables direct local network communication protocols (MQTT on port 8883 and FTPS on port 990) that this server requires.
+For the chosen legacy unsigned LAN workflow, toggle **LAN Only Mode** to **ON** when the model and firmware require it. That workflow uses local MQTT on port 8883 and FTPS on port 990; other routes have different requirements.
 
 **Important:** Enabling LAN Only Mode disconnects the printer from Bambu Lab's cloud services. The Bambu Handy mobile app will stop working while this mode is active. Bambu Studio and OrcaSlicer can still connect over LAN.
 
 ### Step 3: Enable Developer Mode
 
-On firmware that provides it, a **Developer Mode** option appears in the LAN settings. Toggle it **ON**. This allows third-party clients (like this MCP server) to authenticate and send commands over MQTT.
+On firmware that provides it, a **Developer Mode** option appears in the LAN settings. Toggle it **ON**. For the legacy unsigned LAN workflow, this permits supported third-party MQTT commands on firmware requiring it.
 
 ### Step 4: Note the Access Code
 
@@ -308,8 +310,7 @@ The access token is the **Access Code** shown on the printer's network settings 
 **X1 Series (X1C, X1E):**
 1. On the printer touchscreen, go to Settings.
 2. Select Network.
-3. Enable LAN Only Mode and Developer Mode if not already on.
-4. The Access Code appears on this screen.
+3. Find the Access Code on this screen. If it is unavailable, consult the model and firmware instructions; change LAN or Developer Mode only for the chosen route and with the person’s agreement.
 
 **A1 and A1 Mini:**
 1. Open the Bambu Handy app on your phone.
@@ -317,7 +318,7 @@ The access token is the **Access Code** shown on the printer's network settings 
 3. Navigate to Settings > Network.
 4. The Access Code is shown here.
 
-**"The printer rejected the print command (HMS 0500-0500-0001-0007)":** Bambu firmware 01.08.05 and later only accept third-party LAN control with LAN Only Mode and Developer Mode on (Settings > WLAN on the printer). LAN Only Mode turns off cloud and Bambu Handy remote access while it is on. Otherwise start the uploaded file from Bambu Studio or the printer's screen, or print through the [FULU bridge's LAN mode](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/FULU.md#print-through-the-bridge), which signs the command through Bambu's networking plug-in as Bambu Studio does; it printed on a P1S with Developer Mode off. The rejection stays as a fatal HMS entry that blocks later prints until you clear it with `clear_hms_errors` or dismiss it on the printer.
+**"The printer rejected the print command (HMS 0500-0500-0001-0007)":** Some firmware rejects legacy unsigned LAN commands unless the applicable LAN Only and Developer Mode settings are enabled (Settings > WLAN on the printer). Requirements vary by model, firmware and route; this does not establish a requirement for every signed or native path. LAN Only Mode turns off cloud and Bambu Handy remote access while it is on. Otherwise start the uploaded file from Bambu Studio or the printer's screen, or print through the [FULU bridge's LAN mode](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/FULU.md#print-through-the-bridge), which signs the command through Bambu's networking plug-in as Bambu Studio does; it printed on a P1S with Developer Mode off. The rejection stays as a fatal HMS entry that blocks later prints until you clear it with `clear_hms_errors` or dismiss it on the printer.
 
 **"Printer nozzle 0 type is unknown or does not match the job":** the file was sliced for a different nozzle material than the printer reports (a stock P1S preset assumes stainless steel). Slice again with `nozzle_type` or set `BAMBU_NOZZLE_TYPE`.
 

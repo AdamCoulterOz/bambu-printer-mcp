@@ -179,7 +179,11 @@ export async function validateAppMaterial(keyPem: string, chainPem: string, crlP
     await openssl([...verifyArgs(now), '-trusted', ca, '-CRLfile', crl, '-crl_check', leafPath]);
     if (pems.length > 2) {
       const tailRoot = await put(dir, 'tail-root.pem', pems[pems.length - 1]);
-      const tailArgs = [...verifyArgs(now), '-trusted', tailRoot];
+      // This upload-only ancestry lies ABOVE the immutable app trust pin.
+      // Legacy ancestors can omit SKI. Keep normal CA/signature/path/time/
+      // critical-extension checks here; strict pinned app/CRL and device
+      // verification above/below are unchanged.
+      const tailArgs = [...verifyArgs(now).filter(argument => argument !== '-x509_strict'), '-trusted', tailRoot];
       if (pems.length > 3) tailArgs.push('-untrusted', await put(dir, 'tail.pem', pems.slice(2, -1).join('')));
       // Consistency only: this does not replace the independent pinned-leaf check.
       await openssl([...tailArgs, ca]);

@@ -239,3 +239,58 @@ test('a process killed while owning the stable flock inode releases the next res
     assert.equal(await new SequenceStore(directory).next(), '20002');
   } finally { holder.kill('SIGKILL'); }
 });
+test('optional legacy ancestry can omit SKI while strict app trust and tail consistency remain enforced', async () => {
+  // Reissue the existing synthetic app issuer below a legacy upload-only root.
+  // Its key/subject stay identical so the independently checked app/CRL path is
+  // unchanged; only its certificate fingerprint and optional ancestry differ.
+  openssl(['genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', 'tail-root.key'], f.dir);
+  function root(name, constraints, extra = [], key = 'tail-root.key') {
+    openssl(['req', '-x509', '-new', '-key', key, '-out', name + '.pem', '-days', '20', '-set_serial', '0x9001', '-subj', '/CN=Legacy Optional Root', '-addext', 'basicConstraints=critical,' + constraints, '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=none', ...extra], f.dir);
+    return utf8(join(f.dir, name + '.pem'));
+  }
+  const legacyRoot = root('tail-root', 'CA:true,pathlen:1');
+  assert.doesNotMatch(openssl(['x509', '-in', 'tail-root.pem', '-noout', '-text'], f.dir), /Subject Key Identifier/);
+  openssl(['req', '-new', '-key', 'ca.key', '-out', 'tail-pinned.csr', '-subj', '/CN=Independent App CA'], f.dir);
+  f.put('tail-pinned.ext', 'basicConstraints=critical,CA:true,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n');
+  openssl(['x509', '-req', '-in', 'tail-pinned.csr', '-CA', 'tail-root.pem', '-CAkey', 'tail-root.key', '-set_serial', '0x9002', '-days', '15', '-extfile', 'tail-pinned.ext', '-out', 'tail-pinned.pem'], f.dir);
+  const pinned = utf8(join(f.dir, 'tail-pinned.pem')), pin = fingerprint(new X509Certificate(pinned));
+  const leaf = utf8(join(f.dir, 'app.pem'));
+  const check = tail => validateAppMaterial(f.key, leaf + pinned + tail, f.crl, Date.now(), pin);
+  const material = await check(legacyRoot);
+  assert.equal(material.chainPem, leaf + pinned + legacyRoot, 'the full original bundle is preserved');
+
+  const nonCa = root('tail-not-ca', 'CA:false');
+  await assert.rejects(check(nonCa), /SIGNING_APP_CHAIN_UNSUPPORTED/);
+  const critical = root('tail-critical', 'CA:true,pathlen:1', ['-addext', '1.2.3.4=critical,DER:01:01:FF']);
+  await assert.rejects(check(critical), /SIGNING_PKI_VERIFICATION_FAILED/);
+  openssl(['genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', 'tail-wrong.key'], f.dir);
+  const wrongSignature = root('tail-wrong', 'CA:true,pathlen:1', [], 'tail-wrong.key');
+  await assert.rejects(check(wrongSignature), /SIGNING_APP_CHAIN_UNSUPPORTED/);
+
+  // An additional intermediate makes the optional root's path-length ceiling
+  // applicable even when the verification target is itself the pinned CA.
+  const limitedRoot = root('tail-limited', 'CA:true,pathlen:0');
+  openssl(['req', '-new', '-newkey', 'rsa:2048', '-noenc', '-keyout', 'tail-middle.key', '-out', 'tail-middle.csr', '-subj', '/CN=Optional Middle CA'], f.dir);
+  openssl(['x509', '-req', '-in', 'tail-middle.csr', '-CA', 'tail-limited.pem', '-CAkey', 'tail-root.key', '-set_serial', '0x9003', '-days', '15', '-extfile', 'tail-pinned.ext', '-out', 'tail-middle.pem'], f.dir);
+  openssl(['x509', '-req', '-in', 'tail-pinned.csr', '-CA', 'tail-middle.pem', '-CAkey', 'tail-middle.key', '-set_serial', '0x9004', '-days', '15', '-extfile', 'tail-pinned.ext', '-out', 'tail-nested-pinned.pem'], f.dir);
+  const nestedPin = utf8(join(f.dir, 'tail-nested-pinned.pem'));
+  await assert.rejects(validateAppMaterial(f.key, leaf + nestedPin + utf8(join(f.dir, 'tail-middle.pem')) + limitedRoot, f.crl, Date.now(), fingerprint(new X509Certificate(nestedPin))), /SIGNING_PKI_VERIFICATION_FAILED/);
+
+  // Optional ancestors still participate in the current-clock validity bound.
+  openssl(['req', '-new', '-key', 'tail-root.key', '-out', 'tail-root.csr', '-subj', '/CN=Legacy Optional Root'], f.dir);
+  f.put('tail-root.ext', 'basicConstraints=critical,CA:true,pathlen:1\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=none\n');
+  f.put('index.txt.attr', 'unique_subject=no\n');
+  for (const [name, start, end] of [['expired', '20000101000000Z', '20010101000000Z'], ['future', '20900101000000Z', '20910101000000Z']]) {
+    openssl(['ca', '-batch', '-notext', '-selfsign', '-config', 'ca.cnf', '-cert', 'tail-root.pem', '-keyfile', 'tail-root.key', '-in', 'tail-root.csr', '-extfile', 'tail-root.ext', '-startdate', start, '-enddate', end, '-out', `tail-${name}.pem`], f.dir);
+    openssl(['x509', '-req', '-in', 'tail-pinned.csr', '-CA', `tail-${name}.pem`, '-CAkey', 'tail-root.key', '-set_serial', '0x9010', '-days', '15', '-extfile', 'tail-pinned.ext', '-out', `tail-${name}-pinned.pem`], f.dir);
+    const datedPin = utf8(join(f.dir, `tail-${name}-pinned.pem`));
+    await assert.rejects(validateAppMaterial(f.key, leaf + datedPin + utf8(join(f.dir, `tail-${name}.pem`)), f.crl, Date.now(), fingerprint(new X509Certificate(datedPin))), /SIGNING_CERT_EXPIRED_OR_NOT_YET_VALID/);
+  }
+
+  // The required leaf->pin verification still uses OpenSSL strict mode. A leaf
+  // without Authority Key Identifier is refused even though optional legacy
+  // root SKI is tolerated. Existing unknown-critical/usage/CRL tests also apply.
+  f.put('leaf-no-aki.ext', 'basicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=none\n');
+  openssl(['x509', '-req', '-in', 'app.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-set_serial', '0x1001', '-days', '10', '-extfile', 'leaf-no-aki.ext', '-out', 'leaf-no-aki.pem'], f.dir);
+  await assert.rejects(validateAppMaterial(f.key, utf8(join(f.dir, 'leaf-no-aki.pem')) + f.ca, f.crl, Date.now(), f.pin), /SIGNING_PKI_VERIFICATION_FAILED/);
+});
