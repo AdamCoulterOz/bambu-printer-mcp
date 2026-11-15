@@ -16,6 +16,9 @@ export class SigningError extends Error {
 }
 export const fail = (code: string): never => { throw new SigningError(code); };
 const MAX_PEM = 128 * 1024;
+// Trust bundles include current and legacy vendor CAs; certificate chains retain
+// their independent six-certificate bound. The byte limit applies to both.
+const MAX_DEVICE_TRUST_CERTIFICATES = 8;
 export function pemBlocks(input: string, label: 'CERTIFICATE' | 'X509 CRL', maximum = 6): string[] {
   if (typeof input !== 'string' || Buffer.byteLength(input) > MAX_PEM) return fail('SIGNING_PEM_INVALID');
   const pattern = new RegExp(`-----BEGIN ${label}-----[\\r\\n]+[A-Za-z0-9+/=\\r\\n]+-----END ${label}-----`, 'g');
@@ -192,12 +195,12 @@ export async function validateAppMaterial(keyPem: string, chainPem: string, crlP
   return { privateKey, certId: certificateId(leaf), chainPem: pems.join(''), crlPem: crls[0], notBefore, expiresAt };
 }
 export function validateDeviceTrust(trustPem: string): void {
-  const trust = pemBlocks(trustPem, 'CERTIFICATE').map(cert);
+  const trust = pemBlocks(trustPem, 'CERTIFICATE', MAX_DEVICE_TRUST_CERTIFICATES).map(cert);
   if (trust.some(c => !c.ca || fingerprint(c) === APP_CA_SHA256) || new Set(trust.map(fingerprint)).size !== trust.length) fail('SIGNING_DEVICE_TRUST_INVALID');
 }
 export type DeviceMaterial = { publicKey: KeyObject; notBefore: number; expiresAt: number };
 export async function validateDeviceMaterial(chainPem: string, trustPem: string, serial: string, now: number): Promise<DeviceMaterial> {
-  const pems = pemBlocks(chainPem, 'CERTIFICATE'), certificates = pems.map(cert), trust = pemBlocks(trustPem, 'CERTIFICATE');
+  const pems = pemBlocks(chainPem, 'CERTIFICATE'), certificates = pems.map(cert), trust = pemBlocks(trustPem, 'CERTIFICATE', MAX_DEVICE_TRUST_CERTIFICATES);
   const leaf = certificates[0];
   if (leaf.ca || commonNames(leaf).length !== 1 || commonNames(leaf)[0] !== serial) fail('SIGNING_DEVICE_IDENTITY_MISMATCH');
   if (trust.map(cert).some(c => !c.ca)) fail('SIGNING_DEVICE_TRUST_INVALID');

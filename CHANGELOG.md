@@ -11,6 +11,10 @@
 - Add optional Bambu account login through a temporary loopback browser, local session status and logout, and live bound-printer listing. Account authentication can supply signed cloud credentials; tokens are not returned by the tools.
 - Add `get_agent_guide`, task resources and `get_agent_readiness` for discoverable workflows, configuration metadata and local-only readiness. Existing `counterpart/1` setup fields remain unchanged.
 
+### Fixed
+
+- Accept up to eight CA certificates in an operator-provided device trust bundle, independently of the six-certificate chain limit. Preserve the existing size, trust and certificate-validation checks.
+
 These changes have synthetic, mocked and local MCP protocol coverage; they do not establish live account authentication, device acceptance or physical printing.
 
 ## [1.1.94] – 2026-11-12

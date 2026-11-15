@@ -19,6 +19,9 @@ export class SigningError extends Error {
 }
 export const fail = (code) => { throw new SigningError(code); };
 const MAX_PEM = 128 * 1024;
+// Trust bundles include current and legacy vendor CAs; certificate chains retain
+// their independent six-certificate bound. The byte limit applies to both.
+const MAX_DEVICE_TRUST_CERTIFICATES = 8;
 export function pemBlocks(input, label, maximum = 6) {
     if (typeof input !== 'string' || Buffer.byteLength(input) > MAX_PEM)
         return fail('SIGNING_PEM_INVALID');
@@ -263,12 +266,12 @@ export async function validateAppMaterial(keyPem, chainPem, crlPem, now, expecte
     return { privateKey, certId: certificateId(leaf), chainPem: pems.join(''), crlPem: crls[0], notBefore, expiresAt };
 }
 export function validateDeviceTrust(trustPem) {
-    const trust = pemBlocks(trustPem, 'CERTIFICATE').map(cert);
+    const trust = pemBlocks(trustPem, 'CERTIFICATE', MAX_DEVICE_TRUST_CERTIFICATES).map(cert);
     if (trust.some(c => !c.ca || fingerprint(c) === APP_CA_SHA256) || new Set(trust.map(fingerprint)).size !== trust.length)
         fail('SIGNING_DEVICE_TRUST_INVALID');
 }
 export async function validateDeviceMaterial(chainPem, trustPem, serial, now) {
-    const pems = pemBlocks(chainPem, 'CERTIFICATE'), certificates = pems.map(cert), trust = pemBlocks(trustPem, 'CERTIFICATE');
+    const pems = pemBlocks(chainPem, 'CERTIFICATE'), certificates = pems.map(cert), trust = pemBlocks(trustPem, 'CERTIFICATE', MAX_DEVICE_TRUST_CERTIFICATES);
     const leaf = certificates[0];
     if (leaf.ca || commonNames(leaf).length !== 1 || commonNames(leaf)[0] !== serial)
         fail('SIGNING_DEVICE_IDENTITY_MISMATCH');

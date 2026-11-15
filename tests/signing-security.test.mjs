@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { X509Certificate, verify } from 'node:crypto';
 import { promisify } from 'node:util';
 import { trackedMkdtempSync } from './support/temp.mjs';
-import { validateAppMaterial, validateDeviceMaterial, certificateId, fingerprint, checkOpenSsl } from '../dist/signing/pki.js';
+import { validateAppMaterial, validateDeviceMaterial, certificateId, fingerprint, checkOpenSsl, validateDeviceTrust } from '../dist/signing/pki.js';
 import { createSigningSession } from '../dist/signing/index.js';
 import { SigningSession } from '../dist/signing/session.js';
 import { SequenceStore } from '../dist/signing/sequence.js';
@@ -293,4 +293,25 @@ test('optional legacy ancestry can omit SKI while strict app trust and tail cons
   f.put('leaf-no-aki.ext', 'basicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=none\n');
   openssl(['x509', '-req', '-in', 'app.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-set_serial', '0x1001', '-days', '10', '-extfile', 'leaf-no-aki.ext', '-out', 'leaf-no-aki.pem'], f.dir);
   await assert.rejects(validateAppMaterial(f.key, utf8(join(f.dir, 'leaf-no-aki.pem')) + f.ca, f.crl, Date.now(), f.pin), /SIGNING_PKI_VERIFICATION_FAILED/);
+});
+
+test('device trust accepts the bounded eight-CA vendor bundle independently of chain limits', async () => {
+  const roots = [f.ca];
+  for (let index = 1; index <= 8; index++) {
+    openssl(['req', '-x509', '-newkey', 'rsa:2048', '-noenc', '-keyout', `bundle-root-${index}.key`, '-out', `bundle-root-${index}.pem`, '-days', '20', '-subj', `/CN=Synthetic Device Trust ${index}`, '-addext', 'basicConstraints=critical,CA:true,pathlen:0', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash'], f.dir);
+    roots.push(utf8(join(f.dir, `bundle-root-${index}.pem`)));
+  }
+  const trust = roots.slice(0, 8).join('');
+  assert.doesNotThrow(() => validateDeviceTrust(trust));
+  const device = await validateDeviceMaterial(f.device, trust, 'SERIAL1234', Date.now());
+  assert.equal(device.publicKey.asymmetricKeyType, 'rsa');
+  const ninth = roots.join('');
+  assert.throws(() => validateDeviceTrust(ninth), /SIGNING_PEM_INVALID/);
+  await assert.rejects(validateDeviceMaterial(f.device, ninth, 'SERIAL1234', Date.now()), /SIGNING_PEM_INVALID/);
+  assert.throws(() => validateDeviceTrust(f.ca + f.ca + roots.slice(1, 7).join('')), /SIGNING_DEVICE_TRUST_INVALID/);
+  assert.throws(() => validateDeviceTrust(utf8(join(f.dir, 'app.pem')) + roots.slice(1, 8).join('')), /SIGNING_DEVICE_TRUST_INVALID/);
+  // Eight anchors do not permit a seven-certificate reply/app chain or >128KiB.
+  await assert.rejects(validateDeviceMaterial(f.device + roots.slice(1, 6).join(''), trust, 'SERIAL1234', Date.now()), /SIGNING_PEM_INVALID/);
+  await assert.rejects(validateAppMaterial(f.key, f.chain + roots.slice(1, 6).join(''), f.crl, Date.now(), f.pin), /SIGNING_PEM_INVALID/);
+  assert.throws(() => validateDeviceTrust(trust + ' '.repeat(128 * 1024)), /SIGNING_PEM_INVALID/);
 });
