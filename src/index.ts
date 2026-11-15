@@ -77,7 +77,7 @@ import { BLENDER_SETUP_OUTPUT_SCHEMA, BlenderAddonSetup, FUSION_ADDIN_REPOSITORY
 import { bridgeAmsMapping2Entry, bridgeAmsMappingValue, externalTrayForNozzle, hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue, studioAmsMapping, studioAmsMappingInfo, trayColour } from "./ams-mapping.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, hasBambuProjectSettings, hasSlicerSettingsFile, parse3MF, withExtractedSettingsCleanup } from './3mf_parser.js';
 import type { ThreeMFAmsRequirements } from "./types.js";
-import { BambuImplementation, assertDirectPrintSupported, checkedFile, defaultResumeStateDir } from "./printers/bambu.js";
+import { BambuImplementation, PrinterMqttConnectionError, assertDirectPrintSupported, checkedFile, defaultResumeStateDir } from "./printers/bambu.js";
 import { resolveStudioPrintOptions, usedNozzleCount, type CallerPrintOptions } from "./studio-print-options.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { previewPrintFile } from "./safety/print-preview.js";
@@ -1137,7 +1137,18 @@ type StructuredToolError = {
   code?: string;
   slicer_result?: Record<string, unknown>;
   native_diagnostics?: NativeDiagnostics;
+  connection_diagnostics?: PrinterMqttConnectionError["diagnostics"];
+  safety_stage?: "initial_safety" | "confirmation_safety";
 };
+
+/** Add request-specific context without mutating a connection error shared by concurrent waiters. */
+async function withPreflightSafetyStage<T>(stage: "initial_safety" | "confirmation_safety", read: () => Promise<T>): Promise<T> {
+  try { return await read(); }
+  catch (error) {
+    if (error instanceof PrinterMqttConnectionError) throw error.withSafetyStage(stage);
+    throw error;
+  }
+}
 
 type UploadGcodeSource = {
   filePath: string;
@@ -1908,10 +1919,10 @@ export class BambuPrinterMCPServer {
         }
       }
       const requirements = { ...inspection, amsMapping: mapping, useAMS };
-      const initialStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+      const initialStatus = await withPreflightSafetyStage("initial_safety", () => this.bambu.getSafetyStatus(devIp, devId, password || bambuToken));
       validatePrinterState(initialStatus, requirements);
       const preflight = await this.bambu.confirmPrintPreflight(devId, initialStatus, inspection);
-      const confirmedStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+      const confirmedStatus = await withPreflightSafetyStage("confirmation_safety", () => this.bambu.getSafetyStatus(devIp, devId, password || bambuToken));
       validatePrinterState(confirmedStatus, requirements);
       this.bambu.assertPrintPreflight(confirmedStatus, preflight);
       const amsMapping = stringifyBridgeJson(mapping?.map(value => bridgeAmsMappingValue(value, isDualNozzleModel(printModel))));
@@ -5369,12 +5380,15 @@ export class BambuPrinterMCPServer {
           retryable: false,
           suggestion: error instanceof NativeOperationError
             ? "Check the printer and current job before any retry. Do not automatically resend an uncertain native operation."
+            : error instanceof PrinterMqttConnectionError
+              ? "Check the printer's connection and selected route, then perform fresh safety checks before any deliberate new print. Do not automatically resend."
             : refused
               ? `Retrying unchanged repeats this refusal. Fix the reported cause (file, arguments, printer settings, or printer state) first. Error: ${message}`
               : `Check parameters and try again. Error: ${message}`,
           message,
           tool: name,
           ...(error instanceof NativeOperationError ? { native_diagnostics: error.diagnostics } : {}),
+          ...(error instanceof PrinterMqttConnectionError ? { connection_diagnostics: error.diagnostics, ...(error.safetyStage ? { safety_stage: error.safetyStage } : {}) } : {}),
           ...(error instanceof PrinterRefusal ? { code: error.code } : error instanceof NativeOperationError && error.refusalCode ? { code: error.refusalCode } : {}), ...(["print_3mf", "upload_gcode"].includes(name) ? { printOutcome: printOutcome(error) } : {}),
           // The slicer's own result.json; the message starts with its error_string and warnings.
           // A slicer failure always carries slicer_report: the plain sentence a person sees, the slicer's words for the log.

@@ -27,3 +27,8 @@ After expanding the separate device trust-bundle cap to eight CA certificates wh
 The first authorized private native-print attempt reached the client deadline without a helper receipt. A later fresh matching-printer report showed an older completed job and an idle printer; neither that observation nor a missing flight record proves whether the dispatch occurred. The outcome remains unknown and no physical-print qualification is claimed.
 
 The accepted lifecycle repair bounds fresh safety collection and native helper execution, prevents late authorization, and records dispatch bookkeeping synchronously at the final authorization boundary. Success requires an unambiguous receipt for the latest authorized attempt; uncertain outcomes are not replayed. Focused fixtures and independent review support the change; physical-print qualification remains unestablished.
+
+
+## 2026-11-16 — Bounded MQTT connection diagnostics
+
+A private native-print attempt returned an MQTT offline error before recorded dispatch. An independent in-memory MQTT fixture reproduced a 2-second transport timeout before a deliberately delayed 2.5-second CONNACK; the outer connection deadline was already 10 seconds. The transport timeout now matches that outer bound, and sanitized connection diagnostics distinguish the initial and confirmation safety stages. The fixture proves a possible mechanism, not the cause of that live attempt. No retry, safety-check bypass or physical-print qualification follows.

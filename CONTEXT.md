@@ -12,6 +12,8 @@ Agent guidance is available from initialization instructions, `get_agent_guide` 
 
 `get_printer_status({fresh:true})` provides read-only fresh MQTT identity/state/error telemetry through the same shared backend and requires a matching returned serial. Default display status is unchanged. This identity probe does not qualify full print readiness.
 
+An in-memory MQTT fixture reproduced a 2-second transport deadline expiring before a 2.5-second CONNACK; the transport deadline now matches the 10-second connection bound. This reproduces a failure mechanism, not proof of the cause of the private print attempt. Native/bridge print preflight exposes sanitized connection diagnostics and identifies the initial or confirmation safety stage without retrying.
+
 Native-print safety collection and helper execution have bounded deadlines. Expired requests cannot authorize a late dispatch, and helper errors retain allowlisted diagnostics. The native-helper deadline is not an end-to-end limit on slicing or inspection. Focused fixtures and independent review cover the repair; physical printing remains unqualified.
 
 ## Invariants

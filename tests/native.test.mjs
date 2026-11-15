@@ -17,7 +17,7 @@ const printerModule = new URL("../dist/printers/bambu.js", import.meta.url).href
 
 // Exercise platform dispatch on every CI OS. Only the OS selector and transport
 // boundaries are mocked; file inspection, AMS validation and preflight are real.
-async function server(t, { platform = "darwin", model = "x2d", state = "IDLE", gcode = "G1 X0 Y0\n", decline = false, helperDelay = 0, ignoreTerm = false, dispatchState, dispatchError, installedHelper = true, installedPlugin = true, tunnelLibrary = true, arch = "x64", unpinnedOptIn = true, helperFails = false, crashAfterDispatch = false, mqttFails = false, mqttHangs = false, mqttDelay = 0, mqttFirstConnectionOffline = false, hms = [], storage = {}, dispatchStorage, env = {}, printer = "x2d", resumeAfterPrint = false } = {}) {
+async function server(t, { platform = "darwin", model = "x2d", state = "IDLE", gcode = "G1 X0 Y0\n", decline = false, helperDelay = 0, ignoreTerm = false, dispatchState, dispatchError, installedHelper = true, installedPlugin = true, tunnelLibrary = true, arch = "x64", unpinnedOptIn = true, helperFails = false, crashAfterDispatch = false, mqttFails = false, mqttHangs = false, mqttDelay = 0, mqttFirstConnectionOffline = false, hms = [], storage = {}, dispatchStorage, env = {}, printer = "x2d", resumeAfterPrint = false, safetyConnectionFailAt = 0 } = {}) {
   // The printer the plate is sliced for and the fresh report describes; model only sets BAMBU_MODEL.
   const x1c = printer === "x1c";
   const dir = await trackedMkdtemp(path.join(os.tmpdir(), "bambu-native-test-"));
@@ -72,7 +72,7 @@ console.log('native_print result=0');
   await fs.writeFile(file, await zip.generateAsync({ type: "nodebuffer" }));
   const preload = `
     import { appendFileSync, readFileSync, copyFileSync } from 'node:fs';
-    import { BambuImplementation } from ${JSON.stringify(printerModule)};
+    import { BambuImplementation, PrinterMqttConnectionError } from ${JSON.stringify(printerModule)};
     Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)} });
     Object.defineProperty(process, 'arch', { value: ${JSON.stringify(arch)} });
     const record = kind => appendFileSync(${JSON.stringify(eventsFile)}, JSON.stringify({kind})+'\\n');
@@ -116,8 +116,15 @@ console.log('native_print result=0');
     };
     BambuImplementation.prototype.ftpUpload = async () => { record('ftp'); throw new Error('unexpected FTPS'); };
     BambuImplementation.prototype.disconnectAll = async () => { record('disconnect'); };
+    let safetyCalls = 0;
     BambuImplementation.prototype.getSafetyStatus = async (_host, serial) => {
       record('status');
+      safetyCalls++;
+      if (${safetyConnectionFailAt} === safetyCalls) {
+        const error = new PrinterMqttConnectionError({phase:'connect',reason:'offline',elapsedMs:2014,connectTimeoutMs:10000});
+        error.untrustedPrivateDetail = 'PRIVATE_SECRET_DO_NOT_RETURN';
+        throw error;
+      }
       const helperStarted = readFileSync(${JSON.stringify(eventsFile)}, 'utf8').includes('helper');
       const completed = readFileSync(${JSON.stringify(eventsFile)}, 'utf8').includes('dispatched');
       const job = completed && ${resumeAfterPrint} ? JSON.parse(readFileSync(${JSON.stringify(eventsFile)}, 'utf8').trim().split('\\n').find(line => JSON.parse(line).kind === 'helper')) : undefined;
@@ -921,4 +928,25 @@ test('native helper failure after authorized print retains the exact unconfirmed
   assert.deepEqual(saved.structuredContent.record.dispatch.mapping,[0]);
   assert.equal(saved.structuredContent.record.dispatch.outcome,'unconfirmed');
   assert.equal(saved.structuredContent.physical.status,'unknown');
+});
+
+
+for (const [failureAt, stage] of [[1,'initial_safety'],[2,'confirmation_safety']]) test(`native print reports sanitized ${stage} connection failure without dispatch`,async t=>{
+  const s=await server(t,{safetyConnectionFailAt:failureAt});
+  const result=await s.print({connection_mode:'bambu_native',ams_slots:[0]});
+  assert.equal(result.isError,true);assert.equal(result.structuredContent.printOutcome,'not-sent');
+  assert.equal(result.structuredContent.retryable,false);assert.equal(result.structuredContent.safety_stage,stage);
+  assert.deepEqual(result.structuredContent.connection_diagnostics,{phase:'connect',reason:'offline',elapsedMs:2014,connectTimeoutMs:10000});
+  assert.match(result.structuredContent.suggestion,/fresh safety checks/i);assert.match(result.structuredContent.suggestion,/do not automatically resend/i);
+  assert.doesNotMatch(JSON.stringify(result),/PRIVATE_SECRET_DO_NOT_RETURN/);
+  const events=await s.events();assert.equal(events.filter(e=>e.kind==='status').length,failureAt);assert.equal(events.some(e=>e.kind==='helper'||e.kind==='ftp'||e.kind==='dispatched'),false);
+});
+
+test('shared MQTT connection errors retain independent preflight stages',async()=>{
+  const {PrinterMqttConnectionError}=await import('../dist/printers/bambu.js');
+  const shared=new PrinterMqttConnectionError({phase:'subscribe',reason:'offline',elapsedMs:9,connectTimeoutMs:10000});
+  const initial=shared.withSafetyStage('initial_safety'), confirmation=shared.withSafetyStage('confirmation_safety');
+  assert.notEqual(initial,shared);assert.notEqual(confirmation,shared);assert.notEqual(initial,confirmation);
+  assert.equal(shared.safetyStage,undefined);assert.equal(initial.safetyStage,'initial_safety');assert.equal(confirmation.safetyStage,'confirmation_safety');
+  assert.ok(Object.isFrozen(shared.diagnostics));assert.deepEqual(initial.diagnostics,confirmation.diagnostics);
 });

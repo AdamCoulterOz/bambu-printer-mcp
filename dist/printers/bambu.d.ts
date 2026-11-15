@@ -42,6 +42,21 @@ interface BambuPrintOptionsInternal {
     amsSlots?: number[];
     md5?: string;
 }
+export type PrinterMqttSafetyStage = "initial_safety" | "confirmation_safety";
+export type PrinterMqttConnectionDiagnostics = Readonly<{
+    phase: "connect" | "subscribe";
+    reason: "timeout" | "offline" | "close" | "disconnect" | "error" | "cancelled";
+    elapsedMs: number;
+    connectTimeoutMs: number;
+    transportCode?: string;
+}>;
+/** Safe initial-connection evidence; never incorporates transport messages or credentials. */
+export declare class PrinterMqttConnectionError extends Error {
+    readonly safetyStage?: PrinterMqttSafetyStage | undefined;
+    readonly diagnostics: PrinterMqttConnectionDiagnostics;
+    constructor(diagnostics: PrinterMqttConnectionDiagnostics, safetyStage?: PrinterMqttSafetyStage | undefined);
+    withSafetyStage(stage: PrinterMqttSafetyStage): PrinterMqttConnectionError;
+}
 /** A merged MQTT report and when it last arrived (ms since epoch). */
 export type ProgressReport = {
     raw: Record<string, any>;

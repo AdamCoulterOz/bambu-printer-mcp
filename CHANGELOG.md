@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- Align the MQTT transport connection timeout with the existing 10-second connection bound and report sanitized connection diagnostics for initial or confirmation print safety checks. An in-memory delayed-CONNACK fixture reproduced the earlier 2-second timeout mechanism; it does not establish the cause of any live failure. No automatic retry or safety bypass is added.
+
 - Bound native-print safety collection and helper execution, prevent late authorization after expiry, and retain allowlisted native diagnostics in existing errors. Require an unambiguous success receipt for the latest authorized attempt. A missing flight record or helper receipt does not prove an uncertain dispatch was not sent; no automatic replay is added.
 
 - Accept up to eight CA certificates in an operator-provided device trust bundle, independently of the six-certificate chain limit. Preserve the existing size, trust and certificate-validation checks.

@@ -194,6 +194,35 @@ function getPrinterKey(host, serial, token) {
 const MQTT_CONNECT_DEADLINE_MS = 10000;
 const MQTT_DISCONNECT_DEADLINE_MS = 5000;
 const SAFETY_STATUS_DEADLINE_MS = 15000;
+const MQTT_TRANSPORT_CODES = new Set([
+    "ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPIPE",
+    "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+/** Safe initial-connection evidence; never incorporates transport messages or credentials. */
+export class PrinterMqttConnectionError extends Error {
+    constructor(diagnostics, safetyStage) {
+        const messages = {
+            timeout: "Printer MQTT connection timed out after 10 seconds.",
+            offline: "Printer MQTT went offline.", close: "Printer MQTT connection closed.",
+            disconnect: "Printer MQTT disconnected.", cancelled: "Printer MQTT connection cancelled by disconnect.",
+            error: diagnostics.phase === "subscribe" ? "Printer MQTT subscription failed." : "Printer MQTT connection failed.",
+        };
+        super(messages[diagnostics.reason]);
+        this.safetyStage = safetyStage;
+        if (!["connect", "subscribe"].includes(diagnostics.phase) || !Object.prototype.hasOwnProperty.call(messages, diagnostics.reason) ||
+            !Number.isFinite(diagnostics.elapsedMs) || diagnostics.elapsedMs < 0 || !Number.isFinite(diagnostics.connectTimeoutMs) || diagnostics.connectTimeoutMs <= 0 ||
+            (safetyStage !== undefined && !["initial_safety", "confirmation_safety"].includes(safetyStage)))
+            throw new TypeError("Invalid printer MQTT connection diagnostics.");
+        this.name = "PrinterMqttConnectionError";
+        this.diagnostics = Object.freeze({
+            phase: diagnostics.phase, reason: diagnostics.reason, elapsedMs: Math.round(diagnostics.elapsedMs), connectTimeoutMs: diagnostics.connectTimeoutMs,
+            ...(typeof diagnostics.transportCode === "string" && MQTT_TRANSPORT_CODES.has(diagnostics.transportCode) ? { transportCode: diagnostics.transportCode } : {}),
+        });
+    }
+    withSafetyStage(stage) {
+        return new PrinterMqttConnectionError(this.diagnostics, stage);
+    }
+}
 class TolerantBambuClient extends BambuClient {
     constructor() {
         super(...arguments);
@@ -257,6 +286,12 @@ class TolerantBambuClient extends BambuClient {
             if (self.mqttClient)
                 throw new Error("Can't establish a new connection while running another one!");
             let pending = true;
+            let phase = "connect";
+            const startedAt = performance.now();
+            const connectionError = (reason, transportError) => {
+                const transportCode = transportError && typeof transportError === "object" ? Object.getOwnPropertyDescriptor(transportError, "code")?.value : undefined;
+                return new PrinterMqttConnectionError({ phase, reason, elapsedMs: Math.max(0, performance.now() - startedAt), connectTimeoutMs: MQTT_CONNECT_DEADLINE_MS, transportCode });
+            };
             const rejectInitial = (error) => {
                 if (!pending)
                     return;
@@ -265,13 +300,14 @@ class TolerantBambuClient extends BambuClient {
                 this.cancelInitialConnect = undefined;
                 reject(error);
             };
-            this.cancelInitialConnect = rejectInitial;
-            const retire = (error, failed = false) => {
+            this.cancelInitialConnect = () => rejectInitial(connectionError("cancelled"));
+            const retire = (reason, transportError) => {
                 if (this.retired)
                     return;
                 this.retired = true;
+                const error = connectionError(reason, transportError);
                 rejectInitial(error);
-                if (failed)
+                if (reason === "error")
                     self.emit("client:error", error);
                 else
                     self.emit("client:disconnect", true);
@@ -283,11 +319,12 @@ class TolerantBambuClient extends BambuClient {
                 // afterwards so no orphan reconnect timer survives retirement.
                 queueMicrotask(() => { void this.disconnect(true).catch(() => { }); });
             };
-            const deadline = setTimeout(() => retire(new Error("Printer MQTT connection timed out after 10 seconds.")), MQTT_CONNECT_DEADLINE_MS);
+            const deadline = setTimeout(() => retire("timeout"), MQTT_CONNECT_DEADLINE_MS);
             const tlsOpts = {
                 username: "bblp", password: self.config.accessToken,
                 reconnectPeriod: self.config.reconnectInterval,
-                connectTimeout: self.config.connectTimeout,
+                // Allow CONNACK the same budget as the absolute initial-connect guard.
+                connectTimeout: MQTT_CONNECT_DEADLINE_MS,
                 keepalive: self.config.keepAlive,
                 resubscribe: true, rejectUnauthorized: false,
             };
@@ -300,7 +337,7 @@ class TolerantBambuClient extends BambuClient {
                 client = mqtt.connect(`mqtts://${self.config.host}:${self.config.port}`, tlsOpts);
             }
             catch (error) {
-                retire(error instanceof Error ? error : new Error("Printer MQTT connection failed."), true);
+                retire("error", error);
                 return;
             }
             self.mqttClient = client;
@@ -308,6 +345,7 @@ class TolerantBambuClient extends BambuClient {
                 if (this.retired)
                     return;
                 try {
+                    phase = "subscribe";
                     await self.onConnect(...args);
                     if (this.retired || !pending)
                         return;
@@ -318,15 +356,15 @@ class TolerantBambuClient extends BambuClient {
                     resolve();
                 }
                 catch (error) {
-                    retire(error instanceof Error ? error : new Error("Printer MQTT subscription failed."), true);
+                    retire("error", error);
                 }
             });
-            client.on("disconnect", () => retire(new Error("Printer MQTT disconnected.")));
-            client.on("offline", () => retire(new Error("Printer MQTT went offline.")));
-            client.on("close", () => retire(new Error("Printer MQTT connection closed.")));
+            client.on("disconnect", () => retire("disconnect"));
+            client.on("offline", () => retire("offline"));
+            client.on("close", () => retire("close"));
             client.on("message", (topic, payload) => { if (!this.retired)
                 self.emit("rawMessage", topic, payload); });
-            client.on("error", (error) => retire(error, true));
+            client.on("error", (error) => retire("error", error));
         });
         // H2-series printers don't respond to get_version with module info.
         // Infer model from serial number prefix so downstream code works.
@@ -342,7 +380,7 @@ class TolerantBambuClient extends BambuClient {
     disconnect(force = false, options) {
         const self = this;
         this.retired = true;
-        this.cancelInitialConnect?.(new Error("Printer MQTT connection cancelled by disconnect."));
+        this.cancelInitialConnect?.();
         const client = self.mqttClient;
         const forceClose = () => {
             if (!client)

@@ -20,7 +20,7 @@ mock.module("mqtt", {namedExports: {connect: (_url, options) => {
   client.end = (...args) => {client.ends.push(args[0] === true); const callback = args.at(-1); if (!behavior.hungEnd && typeof callback === "function") callback();};
   created.push(client); return client;
 }}});
-const {BambuImplementation} = await import(MODULE_URL);
+const {BambuImplementation, PrinterMqttConnectionError} = await import(MODULE_URL);
 const {withOperationSignal} = await import(OPERATION_URL);
 mock.timers.enable({apis:["setTimeout"]});
 const serial = "20PSYNTHETIC", host = "synthetic.invalid", token = "SYNTHETIC";
@@ -38,9 +38,18 @@ for (const event of ["close", "offline", "disconnect"]) {
   const one = result(backend.getSafetyStatus(host, serial, token)), two = result(backend.getSafetyStatus(host, serial, token));
   await flush(); assert.equal(created.length - start, 1, "parallel waiters share one initial MQTT attempt");
   const client = created.at(-1);
-  assert.equal(client.options.connectTimeout, 2000); assert.equal(client.options.reconnectPeriod, 1000); assert.equal(client.options.keepalive, 20);
+  assert.equal(client.options.connectTimeout, 10000); assert.equal(client.options.reconnectPeriod, 1000); assert.equal(client.options.keepalive, 20);
   client.emit(event);
-  for (const outcome of await Promise.all([one, two])) assert.match(outcome.error?.message ?? "", /closed|offline|disconnected/i);
+  const outcomes = await Promise.all([one, two]);
+  for (const outcome of outcomes) {
+    assert.match(outcome.error?.message ?? "", /closed|offline|disconnected/i);
+    assert.ok(outcome.error instanceof PrinterMqttConnectionError);
+    assert.equal(outcome.error.diagnostics.phase, "connect"); assert.equal(outcome.error.diagnostics.reason, event); assert.equal(outcome.error.diagnostics.connectTimeoutMs, 10000);
+  }
+  assert.equal(outcomes[0].error, outcomes[1].error, "connection failure is shared before caller-specific stage annotation");
+  const firstStage = outcomes[0].error.withSafetyStage("initial_safety"), secondStage = outcomes[1].error.withSafetyStage("confirmation_safety");
+  assert.notEqual(firstStage, secondStage); assert.equal(firstStage.safetyStage, "initial_safety"); assert.equal(secondStage.safetyStage, "confirmation_safety"); assert.equal(outcomes[0].error.safetyStage, undefined);
+  assert.notEqual(firstStage.diagnostics, secondStage.diagnostics); assert.ok(Object.isFrozen(firstStage.diagnostics));
   await flush(); assert.ok(client.ends.includes(true)); assert.equal(backend.printerStore.initialConnectionPromises.size, 0); assert.equal(backend.printerStore.clients.size, 0);
   await backend.disconnectAll(); passed.push("quiet-" + event);
 }
@@ -50,6 +59,7 @@ for (const event of ["close", "offline", "disconnect"]) {
   await flush(); const client = created.at(-1), owned = backend.printerStore.clients.get(key());
   mock.timers.tick(9999); await flush(); assert.equal(settled, false);
   mock.timers.tick(1); const outcome = await pending; assert.match(outcome.error?.message ?? "", /connection timed out/i);
+  assert.equal(outcome.error.diagnostics.phase, "connect"); assert.equal(outcome.error.diagnostics.reason, "timeout");
   await flush(); assert.ok(client.ends.includes(true));
   client.emit("connect"); owned.emit("client:connect"); owned.emit("rawMessage", "device/" + serial + "/report", Buffer.from(JSON.stringify({print:{gcode_state:"RUNNING"}})));
   await flush(); assert.equal(backend.printerStore.printers.size, 0); assert.equal(backend.printerStore.getCachedReport(host, serial, token), null); assert.equal(client.published.length, 0);
@@ -61,7 +71,8 @@ for (const event of ["close", "offline", "disconnect"]) {
   const pending = result(backend.printerStore.getPrinter(host, serial, token)); await flush();
   const client = created.at(-1), owned = backend.printerStore.clients.get(key()); owned.onConnect = () => gate;
   client.emit("connect"); await flush(); mock.timers.tick(10000);
-  assert.match((await pending).error?.message ?? "", /timed out/i); release(); await flush();
+  const outcome = await pending; assert.match(outcome.error?.message ?? "", /timed out/i);
+  assert.equal(outcome.error.diagnostics.phase, "subscribe"); assert.equal(outcome.error.diagnostics.reason, "timeout"); release(); await flush();
   assert.equal(backend.printerStore.printers.size, 0); await backend.disconnectAll(); passed.push("subscription-deadline");
 }
 {
@@ -123,6 +134,19 @@ for (const event of ["close", "offline", "disconnect"]) {
   assert.ok((await cancelled).error); assert.equal((await valid).observedSerial, serial); assert.equal(created.length - start, 1); assert.equal(client.ends.length, 0);
   await backend.disconnectAll(); passed.push("cancelled-waiter-preserves-peer");
 }
+{
+  for (const code of ["ECONNRESET", "SECRET_token_password"]){
+    const backend = new BambuImplementation(); const pending = result(backend.getSafetyStatus(host, serial, token)); await flush();
+    const original = Object.assign(new Error("SECRET host serial token password packet"), {code}); created.at(-1).emit("error", original);
+    const error = (await pending).error; assert.equal(error.message, "Printer MQTT connection failed.");
+    assert.equal(error.diagnostics.reason, "error"); assert.equal(error.diagnostics.transportCode, code === "ECONNRESET" ? code : undefined);
+    assert.ok(!JSON.stringify(error).includes("SECRET")); assert.ok(!error.stack.includes("SECRET")); await backend.disconnectAll();
+  }
+  const input = {phase:"connect",reason:"error",elapsedMs:2,connectTimeoutMs:10000,transportCode:"SECRET",packet:"SECRET",host:"SECRET"};
+  const safe = new PrinterMqttConnectionError(input); input.elapsedMs=999;
+  assert.equal(safe.diagnostics.elapsedMs, 2); assert.ok(!JSON.stringify(safe).includes("SECRET"));
+  passed.push("allowlisted-immutable-diagnostics");
+}
 await flush(); assert.deepEqual(unhandled, []); mock.restoreAll(); console.log(JSON.stringify({passed}));
 `;
   const moduleUrl = new URL("../dist/printers/bambu.js", import.meta.url).href;
@@ -132,5 +156,48 @@ await flush(); assert.deepEqual(unhandled, []); mock.restoreAll(); console.log(J
     encoding: "utf8", timeout: 25_000, stdio: ["pipe", "pipe", "pipe"],
   });
   const {passed} = JSON.parse(stdout.trim());
-  assert.deepEqual(passed, ["quiet-close", "quiet-offline", "quiet-disconnect", "silent-deadline-and-late-connect", "subscription-deadline", "replacement-and-stale-events", "bounded-pending-and-active-drain", "end-to-end-deadline-no-late-collector", "remaining-safety-budget", "cancelled-waiter-preserves-peer"]);
+  assert.deepEqual(passed, ["quiet-close", "quiet-offline", "quiet-disconnect", "silent-deadline-and-late-connect", "subscription-deadline", "replacement-and-stale-events", "bounded-pending-and-active-drain", "end-to-end-deadline-no-late-collector", "remaining-safety-budget", "cancelled-waiter-preserves-peer", "allowlisted-immutable-diagnostics"]);
+});
+
+// Exercise the real MQTT packet/timeout machinery through a Duplex broker.
+// No TCP/TLS socket, printer or vendor endpoint is created.
+test("MQTT allows a 2.5-second CONNACK within its unchanged 10-second hard deadline", {timeout: 30_000}, () => {
+  const source = String.raw`
+import assert from "node:assert/strict";
+import {mock} from "node:test";
+import {Duplex} from "node:stream";
+import {createRequire} from "node:module";
+const real = await import("mqtt"), packets = createRequire(import.meta.url)("mqtt-packet");
+const trials=[]; let legacy=false;
+mock.module("mqtt",{namedExports:{connect:(_url,options)=>{
+  assert.equal(options.connectTimeout,10000);
+  const configured={...options,...(legacy?{connectTimeout:2000}:{})}, events=[], started=performance.now(); let timer;
+  const parser=packets.parser();
+  const stream=new Duplex({read(){},write(chunk,_encoding,done){parser.parse(chunk);done();},destroy(error,done){if(timer)clearTimeout(timer);done(error);}});
+  parser.on("packet",packet=>{
+    if(packet.cmd==="connect")timer=setTimeout(()=>{if(!stream.destroyed)stream.push(packets.generate({cmd:"connack",returnCode:0,sessionPresent:false}));},2500);
+    if(packet.cmd==="subscribe")stream.push(packets.generate({cmd:"suback",messageId:packet.messageId,granted:[0]}));
+    if(packet.cmd==="disconnect")queueMicrotask(()=>stream.destroy());
+  });
+  const client=new real.MqttClient(()=>stream,configured);
+  for(const event of ["connect","offline","close","error"])client.on(event,error=>events.push({event,elapsedMs:Math.round(performance.now()-started),code:error?.message==="connack timeout"?"connack-timeout":undefined}));
+  trials.push({events}); return client;
+}}});
+const {BambuImplementation,PrinterMqttConnectionError}=await import(MODULE_URL);
+for(const previous of [true,false]){
+  legacy=previous; const backend=new BambuImplementation(); let error;
+  try{await backend.printerStore.getPrinter("in-memory.invalid","20PSYNTHETIC","SYNTHETIC");}catch(value){error=value;}
+  if(previous){
+    assert.ok(error instanceof PrinterMqttConnectionError); assert.equal(error.message,"Printer MQTT went offline."); assert.equal(error.diagnostics.phase,"connect"); assert.equal(error.diagnostics.reason,"offline");
+    const events=trials.at(-1).events; assert.equal(events[0].event,"offline"); assert.equal(events[1].code,"connack-timeout");
+  }else{assert.equal(error,undefined);assert.equal(trials.at(-1).events[0].event,"connect");}
+  await backend.disconnectAll();
+}
+mock.restoreAll();console.log(JSON.stringify({legacyFailed:true,currentConnected:true,realMqtt:true,sockets:0}));
+`;
+  const stdout = execFileSync(process.execPath, ["--experimental-test-module-mocks", "--input-type=module"], {
+    input: source.replace("MODULE_URL", JSON.stringify(new URL("../dist/printers/bambu.js", import.meta.url).href)),
+    encoding: "utf8", timeout: 25_000, stdio: ["pipe", "pipe", "pipe"],
+  });
+  assert.deepEqual(JSON.parse(stdout.trim()), {legacyFailed: true, currentConnected: true, realMqtt: true, sockets: 0});
 });
