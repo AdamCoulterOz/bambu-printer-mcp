@@ -15,7 +15,7 @@
 
 - Accept up to eight CA certificates in an operator-provided device trust bundle, independently of the six-certificate chain limit. Preserve the existing size, trust and certificate-validation checks.
 
-These changes have synthetic, mocked and local MCP protocol coverage; they do not establish live account authentication, device acceptance or physical printing.
+Synthetic, mocked and local MCP protocol coverage is supplemented by one authorized private X2D signed-cloud part-fan trial: fresh raw telemetry changed after an acknowledged 20% request and returned to zero after an acknowledged restoration. Raw values do not establish RPM or rotation. This does not qualify other controls, models or firmware, account login, native upload or printing, heating, motion or physical printing; an upstream PR remains subject to the four-client audit.
 
 ## [1.1.94] – 2026-11-12
 
