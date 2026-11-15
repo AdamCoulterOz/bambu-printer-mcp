@@ -145,7 +145,9 @@ class TransferSession {
                     this.payloadMagic = this.header.readUInt32LE(4);
                     if (size > MAX_FRAME)
                         throw this.error('bounds');
-                    if (this.header.readUInt32LE(12) !== 0 || ![LOGIN_ACK, CONTROL_ACK].includes(this.payloadMagic))
+                    // The final DWORD is reserved, not an authenticated status or length.
+                    // X2D replies can leave it nonzero; send zero, but do not interpret it.
+                    if (![LOGIN_ACK, CONTROL_ACK].includes(this.payloadMagic))
                         throw this.error('protocol');
                     this.payload = Buffer.alloc(size);
                     this.payloadUsed = 0;

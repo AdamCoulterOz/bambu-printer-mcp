@@ -44,7 +44,7 @@ import { BLENDER_SETUP_OUTPUT_SCHEMA, BlenderAddonSetup, FUSION_ADDIN_REPOSITORY
 import { bridgeAmsMapping2Entry, bridgeAmsMappingValue, externalTrayForNozzle, hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue, studioAmsMapping, studioAmsMappingInfo, trayColour } from "./ams-mapping.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, hasBambuProjectSettings, hasSlicerSettingsFile, parse3MF, withExtractedSettingsCleanup } from './3mf_parser.js';
 import { BambuImplementation, PrinterMqttConnectionError, assertDirectPrintSupported, checkedFile, defaultResumeStateDir } from "./printers/bambu.js";
-import { verifiedUploadInternal } from "./printers/media-transfer.js";
+import { MediaTransferError, verifiedUploadInternal } from "./printers/media-transfer.js";
 import { resolveStudioPrintOptions, usedNozzleCount } from "./studio-print-options.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { previewPrintFile } from "./safety/print-preview.js";
@@ -4799,15 +4799,18 @@ export class BambuPrinterMCPServer {
                         ? "Check the printer and current job before any retry. Do not automatically resend an uncertain native operation."
                         : error instanceof PrinterMqttConnectionError
                             ? "Check the printer's connection and selected route, then perform fresh safety checks before any deliberate new print. Do not automatically resend."
-                            : error instanceof VerifiedUploadDispatchError
-                                ? "Check printer status and the current job before any deliberate new print. Do not automatically resend."
-                                : refused
-                                    ? `Retrying unchanged repeats this refusal. Fix the reported cause (file, arguments, printer settings, or printer state) first. Error: ${message}`
-                                    : `Check parameters and try again. Error: ${message}`,
+                            : error instanceof MediaTransferError
+                                ? "Check the transfer failure and printer storage state before any deliberate new attempt. Do not automatically retry."
+                                : error instanceof VerifiedUploadDispatchError
+                                    ? "Check printer status and the current job before any deliberate new print. Do not automatically resend."
+                                    : refused
+                                        ? `Retrying unchanged repeats this refusal. Fix the reported cause (file, arguments, printer settings, or printer state) first. Error: ${message}`
+                                        : `Check parameters and try again. Error: ${message}`,
                     message,
                     tool: name,
                     ...(error instanceof NativeOperationError ? { native_diagnostics: error.diagnostics } : {}),
                     ...(error instanceof VerifiedUploadDispatchError ? { verified_upload: error.upload } : {}),
+                    ...(error instanceof MediaTransferError ? { transfer_diagnostics: { stage: error.stage, reason: error.reason, uploadMayExist: error.uploadMayExist } } : {}),
                     ...(error instanceof PrinterMqttConnectionError ? { connection_diagnostics: error.diagnostics, ...(error.safetyStage ? { safety_stage: error.safetyStage } : {}) } : {}),
                     ...(error instanceof PrinterRefusal ? { code: error.code } : error instanceof NativeOperationError && error.refusalCode ? { code: error.refusalCode } : {}), ...(["print_3mf", "upload_gcode"].includes(name) ? { printOutcome: printOutcome(error) } : {}),
                     // The slicer's own result.json; the message starts with its error_string and warnings.

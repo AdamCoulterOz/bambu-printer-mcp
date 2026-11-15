@@ -1037,3 +1037,18 @@ test('selected signed internal readiness exposes only local configuration shape'
   const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
   assert.deepEqual(events,[]);
 });
+
+
+for (const [scenario, expected] of [['login', {stage:'login',reason:'protocol',uploadMayExist:false}], ['upload', {stage:'upload',reason:'closed',uploadMayExist:true}]]) {
+  test(`signed internal ${scenario} failure reports safe transfer diagnostics without retry advice`, async t => {
+    const s=await server(t,{signedInternal:true,env:{SIGNED_TEST_TRANSFER_ERROR:scenario}});
+    const result=await s.client.callTool({name:'upload_file',arguments:{filename:'safe.3mf',file_path:s.file,bambu_model:'x2d',connection_mode:'signed_mqtt'}});
+    assert.equal(result.isError,true); assert.equal(result.structuredContent.retryable,false);
+    assert.deepEqual(result.structuredContent.transfer_diagnostics,expected);
+    assert.match(result.structuredContent.suggestion,/Do not automatically retry/);
+    assert.doesNotMatch(JSON.stringify(result),/PRIVATE_SECRET_DO_NOT_RETURN/);
+    const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+    assert.equal(events.filter(e=>e.kind==='verified-upload').length,1);
+    assert.ok(!events.some(e=>e.value?.signed || e.kind==='ftp' || e.kind==='helper'));
+  });
+}

@@ -10,8 +10,9 @@ import { verifiedUploadInternal, MediaTransferError } from '../dist/printers/med
 const hash = (algorithm, bytes) => createHash(algorithm).update(bytes).digest('hex');
 const name = 'checked-60f770b6-3671-4e45-a31e-326eb2231629.gcode.3mf';
 const serial = '20PTEST00000001';
-const frame = (magic, payload) => {
+const frame = (magic, payload, reserved = 0) => {
   const header = Buffer.alloc(16); header.writeUInt32LE(payload.length); header.writeUInt32LE(magic, 4);
+  header.writeUInt32LE(reserved, 12);
   return Buffer.concat([header, payload]);
 };
 
@@ -57,7 +58,7 @@ class Peer {
     const json = { mtype: request.mtype, sequence: request.sequence, ...(request.cmdtype === undefined ? {} : { cmdtype: request.cmdtype }), result, ...(reply === undefined ? {} : { reply }) };
     this.json?.(json, request);
     const payload = Buffer.from(JSON.stringify(json));
-    socket.deliver(frame(0x0002013f, binary === undefined ? payload : Buffer.concat([payload, Buffer.from('\n\n'), binary])));
+    socket.deliver(frame(0x0002013f, binary === undefined ? payload : Buffer.concat([payload, Buffer.from('\n\n'), binary]), this.controlReserved ?? 0));
   }
   receive(socket, bytes) {
     const magic = bytes.readUInt32LE(4); const payload = bytes.subarray(16);
@@ -66,7 +67,9 @@ class Peer {
     if (magic === 0x0101013f) {
       assert.equal(payload.length, 16); assert.equal(payload.subarray(0, 8).toString(), 'bblp\0\0\0\0');
       assert.equal(payload.subarray(8).toString(), 'TESTCODE');
-      socket.deliver(frame(0x0001013f, Buffer.alloc(4))); return;
+      if (this.loginReply?.(socket) === false) return;
+      const status = Buffer.alloc(4); status.writeUInt32LE(this.loginStatus ?? 0);
+      socket.deliver(frame(0x0001013f, status, this.loginReserved ?? 0)); return;
     }
     assert.equal(magic, 0x0102013f);
     const separator = payload.indexOf('\n\n');
@@ -340,13 +343,52 @@ test('oversized frame rejected from header before allocating advertised payload'
   } } }, 'bounds', 'capability');
 });
 
-test('bad magic and reserved field fail closed', async t => {
-  for (const field of [4, 12]) {
-    const f = await fixture(t, { before(socket, req) { if (req.cmdtype === 7) {
-      const header = frame(0x0002013f, Buffer.from('{}')); header.writeUInt32LE(42, field); socket.deliver(header); return false;
-    } } });
-    await assert.rejects(f.invoke(), error => error.reason === 'protocol');
-  }
+test('bad magic still fails closed before uploading bytes', async t => {
+  const f = await fails(t, { before(socket, req) { if (req.cmdtype === 7) {
+    const header = frame(42, Buffer.from('{}')); socket.deliver(header); return false;
+  } } }, 'protocol', 'capability');
+  assert.equal(f.peer.chunks.length, 0);
+});
+
+test('nonzero opaque reserved DWORDs in login and control replies are accepted', async t => {
+  // Synthetic opaque values reproduce the observed header shape without retaining
+  // the printer's uninterpreted reserved bytes. FakeTls splits every header.
+  const f = await fixture(t, { loginReserved: 0x13579bdf, controlReserved: 0xfedcba98 }, 1001);
+  assert.equal((await f.invoke()).sha256, f.options.snapshotSha256);
+  for (const bytes of f.peer.socket.writes) assert.equal(bytes.readUInt32LE(12), 0, 'TX reserved stays zero');
+});
+
+test('coalesced control replies with opaque reserved DWORDs retain cmd/sequence correlation', async t => {
+  const f = await fixture(t, { loginReserved: 0x13579bdf, controlReserved: 0x13579bdf, before(socket, req) {
+    if (req.cmdtype !== 7) return;
+    const stale = { mtype: 12289, sequence: req.sequence + 1, cmdtype: 7, result: 0, reply: {} };
+    const current = { mtype: 12289, sequence: req.sequence, cmdtype: 7, result: 0,
+      reply: { storage: ['emmc'], upload_storage: ['emmc'], allow_internal_model_download: true } };
+    socket.deliver(Buffer.concat([frame(0x0002013f, Buffer.from(JSON.stringify(stale)), 1), frame(0x0002013f, Buffer.from(JSON.stringify(current)), 2)]));
+    return false;
+  } }, 1001);
+  assert.equal((await f.invoke()).verifiedBy, 'readback');
+});
+
+test('nonzero reserved cannot hide a rejected login ACK status', async t => {
+  const f = await fails(t, { loginReserved: 0x13579bdf, loginStatus: 1 }, 'remote-rejected', 'login');
+  assert.equal(f.peer.commands.length, 0); assert.equal(f.peer.chunks.length, 0);
+});
+
+test('truncated login ACK payload closes without setup or file writes', async t => {
+  const f = await fails(t, { loginReply(socket) {
+    const bytes = frame(0x0001013f, Buffer.alloc(4), 0x13579bdf);
+    socket.deliver(bytes.subarray(0, 18)); socket.emit('end'); return false;
+  } }, 'closed', 'login');
+  assert.equal(f.peer.commands.length, 0); assert.equal(f.peer.chunks.length, 0);
+});
+
+test('oversized login frame is rejected before allocating payload or file writes', async t => {
+  const f = await fails(t, { loginReply(socket) {
+    const header = frame(0x0001013f, Buffer.alloc(0), 0x13579bdf); header.writeUInt32LE(0xffffffff);
+    socket.deliver(header); return false;
+  } }, 'bounds', 'login');
+  assert.equal(f.peer.commands.length, 0); assert.equal(f.peer.chunks.length, 0);
 });
 
 test('peer text and credentials are not reflected in errors', async t => {

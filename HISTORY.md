@@ -36,3 +36,7 @@ A private native-print attempt returned an MQTT offline error before recorded di
 ## 2026-11-16 — Explicit signed project route
 
 Added a candidate capability-driven direct internal-storage 3MF transfer and readback path coupled to the existing signed MQTT project command, with explicit TLS trust and no fallback or replay. It reuses the prior Android-derived signing work; it does not use or repair the vendor native SDK's separate -26 readiness gate. Independent published protocol research informed the design without copying its implementation. Focused synthetic and MCP tests do not establish a live upload or physical print; private deployment and qualification remain pending.
+
+## 2026-11-16 — Storage login interoperability
+
+The first private signed-route upload-only attempt failed in login framing before an upload receipt. A subsequent strict-TLS login probe returned the expected acknowledgement magic, length and sequence with a nonzero opaque reserved field. The receiver now permits that field while retaining the other login and transport checks; outgoing reserved fields remain zero. Focused fixtures cover the correction and typed failure diagnostics without retry. This observation does not qualify an upload or physical print.
