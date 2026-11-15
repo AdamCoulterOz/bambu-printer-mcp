@@ -2027,8 +2027,10 @@ export class BambuImplementation {
                 }
                 assertActive();
                 const destination = path.posix.join(path.posix.dirname(remotePath), uniquePrintName(remotePath));
+                if (inspections.some(inspection => inspection.sha256 !== inspections[0]?.sha256))
+                    throw new Error("Inspected upload plates do not share the same file identity.");
                 if (upload)
-                    await upload(snapshot, destination, assertActive);
+                    await upload(snapshot, destination, assertActive, inspections[0]?.sha256);
                 else {
                     try {
                         await this.ftpUpload(host, token, snapshot, `/${destination}`);

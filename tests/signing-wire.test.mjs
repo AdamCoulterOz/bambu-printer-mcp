@@ -59,3 +59,9 @@ test('signs the existing typed AMS drying addresses including AMS HT without bro
   for (const ams_id of [-1, 4, 127, 129, 255, 1.5, '1', '128']) assert.throws(() => encodeSignedPrint({ command: 'ams_control', sequence_id: '20004', ams_id, param: 'start_drying' }, 'cert', app.privateKey, device.publicKey));
   for (const ams_id of [0, 128]) assert.throws(() => encodeSignedPrint({ command: 'ams_control', sequence_id: '20004', ams_id, param: 'arbitrary' }, 'cert', app.privateKey, device.publicKey));
 });
+
+test('signed project accepts only bounded physical nozzle mappings', () => {
+  const make = nozzle_mapping => encodeSignedPrint({command:'project_file', sequence_id:'1', url:'brtc://emmc/model.3mf', nozzle_mapping}, 'cert', app.privateKey, device.publicKey);
+  assert.deepEqual(JSON.parse(make([1,0]).toString()).print.nozzle_mapping, [1,0]);
+  for (const invalid of [[], [-1], [2], [0.5], ['1'], Array(65).fill(0)]) assert.throws(() => make(invalid), /nozzle mapping/);
+});

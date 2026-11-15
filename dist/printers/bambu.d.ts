@@ -223,7 +223,7 @@ export declare class BambuImplementation {
         files: string[];
         directories: Record<string, string[]>;
     }>;
-    uploadFile(host: string, serial: string, token: string, filePath: string, filename: string, print: boolean, bambuModel?: string, upload?: (snapshot: string, destination: string, assertActive: () => void) => Promise<void>): Promise<{
+    uploadFile(host: string, serial: string, token: string, filePath: string, filename: string, print: boolean, bambuModel?: string, upload?: (snapshot: string, destination: string, assertActive: () => void, inspectedSha256?: string) => Promise<void>): Promise<{
         status: string;
         uploaded: boolean;
         remotePath: string;

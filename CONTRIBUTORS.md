@@ -2,6 +2,10 @@
 
 Thank you to everyone who builds, tests, reports problems, and shares real printer evidence. The project is stronger because of your work!
 
+## Independent protocol research
+
+[ClusterM and open-bamboo-networking contributors](https://github.com/ClusterM/open-bamboo-networking) documented [port 6000 storage](https://github.com/ClusterM/open-bamboo-networking/blob/master/research/06.04-port-6000.md) and the [print ABI](https://github.com/ClusterM/open-bamboo-networking/blob/master/research/08.08-print-abi.md). The candidate route uses independently implemented protocol facts; this acknowledgement does not imply their endorsement or a live qualification of this server.
+
 ## Release contributions
 
 | Contributor | Contribution |

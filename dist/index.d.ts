@@ -38,6 +38,7 @@ export declare class BambuPrinterMCPServer {
     private print3mfViaBambuNetwork;
     private handoff3mfViaBambuConnect;
     private print3mfViaBambuNative;
+    private uploadFileViaSignedInternal;
     private uploadFileViaBambuNative;
     private getResolvedPrinterFilamentInventory;
     /**

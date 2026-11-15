@@ -31,6 +31,7 @@ export interface SignedTransportOptions {
     tlsCa?: Buffer;
     tlsServername?: string;
     beforePublish?: () => Promise<void>;
+    onPublish?: () => void;
     assertActive?: () => void;
     accountGuard?: {
         assertCurrent(): Promise<void>;
@@ -64,7 +65,7 @@ export declare function signedControlConfiguration(env: NodeJS.ProcessEnv, host:
         assertGenerationCurrent(): void;
     };
 };
-export declare function sendSignedControl(config: NonNullable<ReturnType<typeof signedControlConfiguration>>, serial: string, command: CommandInput, signal?: AbortSignal, beforePublish?: () => Promise<void>, assertActive?: () => void): Promise<void>;
+export declare function sendSignedControl(config: NonNullable<ReturnType<typeof signedControlConfiguration>>, serial: string, command: CommandInput, signal?: AbortSignal, beforePublish?: () => Promise<void>, assertActive?: () => void, onPublish?: () => void): Promise<void>;
 export declare function sendTypedLight(config: NonNullable<ReturnType<typeof signedControlConfiguration>>, serial: string, light: string, mode: string, signal?: AbortSignal): Promise<void>;
 /** Opt-in selection also treats malformed values as selected so writes fail closed. */
 export declare function signedControlsRequested(env: NodeJS.ProcessEnv): boolean;

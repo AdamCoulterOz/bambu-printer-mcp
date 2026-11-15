@@ -32,3 +32,7 @@ The accepted lifecycle repair bounds fresh safety collection and native helper e
 ## 2026-11-16 — Bounded MQTT connection diagnostics
 
 A private native-print attempt returned an MQTT offline error before recorded dispatch. An independent in-memory MQTT fixture reproduced a 2-second transport timeout before a deliberately delayed 2.5-second CONNACK; the outer connection deadline was already 10 seconds. The transport timeout now matches that outer bound, and sanitized connection diagnostics distinguish the initial and confirmation safety stages. The fixture proves a possible mechanism, not the cause of that live attempt. No retry, safety-check bypass or physical-print qualification follows.
+
+## 2026-11-16 — Explicit signed project route
+
+Added a candidate capability-driven direct internal-storage 3MF transfer and readback path coupled to the existing signed MQTT project command, with explicit TLS trust and no fallback or replay. It reuses the prior Android-derived signing work; it does not use or repair the vendor native SDK's separate -26 readiness gate. Independent published protocol research informed the design without copying its implementation. Focused synthetic and MCP tests do not establish a live upload or physical print; private deployment and qualification remain pending.

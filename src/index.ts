@@ -78,6 +78,7 @@ import { bridgeAmsMapping2Entry, bridgeAmsMappingValue, externalTrayForNozzle, h
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, hasBambuProjectSettings, hasSlicerSettingsFile, parse3MF, withExtractedSettingsCleanup } from './3mf_parser.js';
 import type { ThreeMFAmsRequirements } from "./types.js";
 import { BambuImplementation, PrinterMqttConnectionError, assertDirectPrintSupported, checkedFile, defaultResumeStateDir } from "./printers/bambu.js";
+import { verifiedUploadInternal, type VerifiedInternalUpload } from "./printers/media-transfer.js";
 import { resolveStudioPrintOptions, usedNozzleCount, type CallerPrintOptions } from "./studio-print-options.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { previewPrintFile } from "./safety/print-preview.js";
@@ -168,7 +169,7 @@ let DEFAULT_BAMBU_CONNECTION_TYPE =
   process.env.BAMBU_DEFAULT_CONNECTION_TYPE?.trim().toLowerCase() || "";
 /** The connection configured at start, before counterpart_print_route changes it: its own local route is kept. */
 const CONFIGURED_CONNECTION = { mode: DEFAULT_BAMBU_CONNECTION_MODE, type: DEFAULT_BAMBU_CONNECTION_TYPE };
-const CONNECTION_MODES = ["lan_mqtt_ftps", "bambu_native", "bambu_network", "bambu_connect"];
+const CONNECTION_MODES = ["lan_mqtt_ftps", "bambu_native", "bambu_network", "bambu_connect", "signed_mqtt"];
 
 /**
  * The one route decision for a printer: print_3mf and every print control
@@ -1139,7 +1140,31 @@ type StructuredToolError = {
   native_diagnostics?: NativeDiagnostics;
   connection_diagnostics?: PrinterMqttConnectionError["diagnostics"];
   safety_stage?: "initial_safety" | "confirmation_safety";
+  verified_upload?: VerifiedInternalUpload;
 };
+
+class VerifiedUploadDispatchError extends Error {
+  constructor(readonly upload: VerifiedInternalUpload, cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Signed print dispatch failed.");
+    this.name = "VerifiedUploadDispatchError";
+  }
+}
+
+/** Read the independently configured printer TLS trust without exposing paths. */
+function printerTransferTls(): { ca: Buffer } {
+  const file = process.env.BAMBU_PRINTER_TLS_CA_FILE?.trim();
+  if (!file || !path.isAbsolute(file)) throw new Error("Signed internal transfer requires a configured printer TLS CA file.");
+  try {
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size < 1 || stat.size > 128 * 1024) throw new Error();
+      const ca = fs.readFileSync(fd);
+      if (!ca.length || ca.length > 128 * 1024) throw new Error();
+      return { ca };
+    } finally { fs.closeSync(fd); }
+  } catch { throw new Error("Signed internal transfer printer TLS trust is unavailable or invalid."); }
+}
 
 /** Add request-specific context without mutating a connection error shared by concurrent waiters. */
 async function withPreflightSafetyStage<T>(stage: "initial_safety" | "confirmation_safety", read: () => Promise<T>): Promise<T> {
@@ -1814,7 +1839,7 @@ export class BambuPrinterMCPServer {
     host: string,
     bambuSerial: string,
     bambuToken: string,
-    native?: { onUpdate?: BambuNativeUpdateCallback; signal?: AbortSignal }
+    native?: { onUpdate?: BambuNativeUpdateCallback; signal?: AbortSignal; signed?: boolean }
   ): Promise<Record<string, unknown>> {
     if (!args?.three_mf_path) {
       throw new Error("Missing required parameter: three_mf_path");
@@ -1926,7 +1951,7 @@ export class BambuPrinterMCPServer {
       validatePrinterState(confirmedStatus, requirements);
       this.bambu.assertPrintPreflight(confirmedStatus, preflight);
       const amsMapping = stringifyBridgeJson(mapping?.map(value => bridgeAmsMappingValue(value, isDualNozzleModel(printModel))));
-      const remoteFileName = uniquePrintName(threeMFPath);
+      const remoteFileName = native?.signed ? `checked-${randomUUID()}.gcode.3mf` : uniquePrintName(threeMFPath);
       const checkedName = remoteFileName.replace(/(?:\.gcode)?\.3mf$/i, "");
       if (cloudFallbackMethod && externalStorageState(confirmedStatus.raw) !== "normal") {
         // Studio sends straight through the cloud when the printer has no storage for the LAN upload.
@@ -1988,6 +2013,51 @@ export class BambuPrinterMCPServer {
       };
 
       assertActive();
+      if (native?.signed) {
+        if (!signedControlsRequested(process.env)) throw new Error("signed_mqtt requires explicitly enabled signed controls.");
+        if (args.try_emmc_print === false) throw new Error("signed_mqtt requires internal storage.");
+        const signing = await resolveSignedControlConfiguration(process.env, devIp, password || bambuToken, devId);
+        if (!signing) throw new Error("Signed control configuration is unavailable.");
+        const tls = printerTransferTls();
+        let nozzleMapping: number[] | undefined;
+        if (isDualNozzleModel(printModel)) {
+          nozzleMapping = inspection.filamentNozzleIndices;
+          if (!nozzleMapping || nozzleMapping.length !== inspection.materials.length || nozzleMapping.length > 64 || nozzleMapping.some(value => value !== 0 && value !== 1)) {
+            throw new Error("Selected plate requires complete verified physical nozzle mappings.");
+          }
+        }
+        if (!inspection.plateInternalPath) throw new Error("Selected plate path is missing.");
+        const upload = await verifiedUploadInternal({ host: devIp, serial: devId, accessCode: password || bambuToken,
+          ...tls, filePath: snapshot, snapshotSha256: inspection.sha256, remoteName: remoteFileName,
+          signal: native.signal, assertActive });
+        const command: CommandInput = {
+          command: "project_file", param: inspection.plateInternalPath, url: upload.url, file: upload.name,
+          md5: "from_sd_card", bed_type: printBedType, timelapse: Boolean(params.task_record_timelapse),
+          bed_leveling: studio.task_bed_leveling, auto_bed_leveling: studio.auto_bed_leveling,
+          flow_cali: studio.task_flow_cali, vibration_cali: studio.task_vibration_cali,
+          layer_inspect: studio.task_layer_inspect, use_ams: useAMS, cfg: "0", extrude_cali_flag: 0,
+          extrude_cali_manual_mode: studio.extruder_cali_manual_mode, nozzle_offset_cali: studio.auto_offset_cali,
+          subtask_name: checkedName, project_id: "0", profile_id: "0", task_id: "0", subtask_id: "0",
+          ams_mapping: mapping?.map(value => bridgeAmsMappingValue(value, isDualNozzleModel(printModel))) ?? [],
+          ams_mapping2: JSON.parse(nativeAmsMapping2(mapping, isDualNozzleModel(printModel)) || "[]"),
+          ...(nozzleMapping ? { nozzle_mapping: nozzleMapping } : {}),
+        };
+        try {
+          await sendSignedControl(signing, devId, command, native.signal, async () => {
+            assertActive();
+            const latest = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+            validatePrinterState(latest, requirements);
+            this.bambu.assertPrintPreflight(latest, preflight);
+            assertNativeInternalStorage(printModel, latest.raw);
+            assertActive();
+          }, assertActive, () => {
+            this.bambu.recordFlightDispatch(devIp, devId, upload.name, requirements, resumeFile);
+            markPrintCommandSent();
+          });
+          this.bambu.recordCheckedJob(devIp, devId, upload.name, requirements, resumeFile, false);
+        } catch (error) { throw new VerifiedUploadDispatchError(upload, error); }
+        return { status: "success", route: "signed_mqtt", upload, dispatch: "unconfirmed", autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping };
+      }
       if (native) {
         const externalStorage = nativeExternalStorage(args?.try_emmc_print, confirmedStatus.raw, printModel);
         if (externalStorage && externalStorageState(confirmedStatus.raw) !== "normal") {
@@ -2093,7 +2163,7 @@ export class BambuPrinterMCPServer {
         amsMapping: mapping,
         params: redactPrintParams(params),
       };
-    }, bridgeSnapshotRoot()));
+    }, native?.signed ? undefined : bridgeSnapshotRoot()));
   }
 
   private async handoff3mfViaBambuConnect(
@@ -2150,6 +2220,23 @@ export class BambuPrinterMCPServer {
       { ...args, bambu_model: model, connection_type: "lan", bambu_network_method: "start_local_print" },
       host, bambuSerial, bambuToken, { onUpdate, signal }
     );
+  }
+
+  private async uploadFileViaSignedInternal(filePath: string, filename: string, model: string, host: string, serial: string, token: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+    if (!signedControlsRequested(process.env)) throw new Error("signed_mqtt requires explicitly enabled signed controls.");
+    if (!/\.3mf$/i.test(filePath) || !/\.3mf$/i.test(filename)) throw new Error("signed_mqtt internal upload supports inspected 3MF projects only; no file was uploaded.");
+    const signing = await resolveSignedControlConfiguration(process.env, host, token, serial);
+    if (!signing) throw new Error("Signed control configuration is unavailable.");
+    const tls = printerTransferTls();
+    let receipt: VerifiedInternalUpload | undefined;
+    await this.bambu.uploadFile(host, serial, token, filePath, filename, false, model, async (snapshot, _destination, assertActive, inspectedSha256) => {
+      if (!inspectedSha256) throw new Error("Signed internal upload requires an inspected 3MF identity.");
+      assertActive();
+      receipt = await verifiedUploadInternal({ host, serial, accessCode: token, ...tls,
+        filePath: snapshot, snapshotSha256: inspectedSha256,
+        remoteName: `checked-${randomUUID()}.gcode.3mf`, signal, assertActive });
+    });
+    return { status: "success", uploaded: true, printRequested: false, inspected: true, upload: receipt };
   }
 
   private async uploadFileViaBambuNative(
@@ -3100,6 +3187,7 @@ export class BambuPrinterMCPServer {
               type: "object",
               properties: {
                 filename: { type: "string", description: "Name for the file on the printer" },
+                connection_mode: { type: "string", enum: ["lan_mqtt_ftps", "signed_mqtt"], description: "Raw G-code uses lan_mqtt_ftps; signed_mqtt refuses raw G-code because its internal transfer is limited to inspected 3MF projects." },
                 gcode: { type: "string", description: "G-code content to upload, or a readable local .gcode path. Required unless gcode_path is provided. For large files, prefer gcode_path." },
                 gcode_path: { type: "string", description: "Local path to a .gcode file to upload. Required unless gcode is provided. This avoids sending large G-code bodies through the MCP request." },
                 bambu_model: { type: "string", enum: [...VALID_BAMBU_MODELS], description: "Required printer model for inspecting the uploaded G-code, even when not starting it." },
@@ -3121,8 +3209,8 @@ export class BambuPrinterMCPServer {
                 print: { type: "boolean", description: "Start printing after upload (default: false)" },
                 connection_mode: {
                   type: "string",
-                  enum: ["lan_mqtt_ftps", "bambu_native"],
-                  description: "Upload transport; bambu_native uses the installed Bambu networking plug-in for X2D or X1C and never starts printing."
+                  enum: ["lan_mqtt_ftps", "bambu_native", "signed_mqtt"],
+                  description: "Upload transport; signed_mqtt verifies an inspected 3MF internal-storage upload; bambu_native uses the installed Bambu networking plug-in for X2D or X1C and never starts printing."
                 },
                 bambu_model: {
                   type: "string",
@@ -3187,7 +3275,7 @@ export class BambuPrinterMCPServer {
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                 bambu_token: { type: "string", description: "Access token (default: value from env)" },
-                connection_mode: { type: "string", enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native"], description: "The connection the print used. Defaults to BAMBU_DEFAULT_CONNECTION_MODE, the same default print_3mf uses, else the model's route." },
+                connection_mode: { type: "string", enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "signed_mqtt"], description: "The connection the print used. Defaults to BAMBU_DEFAULT_CONNECTION_MODE, the same default print_3mf uses, else the model's route." },
                 connection_type: { type: "string", enum: ["lan", "cloud"], description: "FULU BambuNetwork connection type the print used. Defaults to BAMBU_DEFAULT_CONNECTION_TYPE, as for print_3mf. Authenticated controls support lan." }
               }
             }
@@ -3201,7 +3289,7 @@ export class BambuPrinterMCPServer {
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                 bambu_token: { type: "string", description: "Access token (default: value from env)" },
-                connection_mode: { type: "string", enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native"], description: "The connection the print used. Defaults to BAMBU_DEFAULT_CONNECTION_MODE, the same default print_3mf uses, else the model's route." },
+                connection_mode: { type: "string", enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "signed_mqtt"], description: "The connection the print used. Defaults to BAMBU_DEFAULT_CONNECTION_MODE, the same default print_3mf uses, else the model's route." },
                 connection_type: { type: "string", enum: ["lan", "cloud"], description: "FULU BambuNetwork connection type the print used. Defaults to BAMBU_DEFAULT_CONNECTION_TYPE, as for print_3mf. Authenticated controls support lan." }
               }
             }
@@ -3215,7 +3303,7 @@ export class BambuPrinterMCPServer {
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                 bambu_token: { type: "string", description: "Access token (default: value from env)" },
-                connection_mode: { type: "string", enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native"], description: "The connection the print used. Defaults to BAMBU_DEFAULT_CONNECTION_MODE, the same default print_3mf uses, else the model's route." },
+                connection_mode: { type: "string", enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "signed_mqtt"], description: "The connection the print used. Defaults to BAMBU_DEFAULT_CONNECTION_MODE, the same default print_3mf uses, else the model's route." },
                 connection_type: { type: "string", enum: ["lan", "cloud"], description: "FULU BambuNetwork connection type the print used. Defaults to BAMBU_DEFAULT_CONNECTION_TYPE, as for print_3mf. Authenticated controls support lan." }
               }
             }
@@ -3430,8 +3518,8 @@ export class BambuPrinterMCPServer {
                 },
                 connection_mode: {
                   type: "string",
-                  enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "bambu_connect"],
-                  description: "Print path: bambu_connect hands a printable file to the signed-in Bambu Connect app for cloud-mode review; X2D otherwise defaults to bambu_native (Bambu Studio's installed local networking plug-in, storing the job on a ready SD card or USB stick, otherwise internal eMMC); X1C may opt in to bambu_native, for example when its firmware refuses FTPS uploads with 553; lan_mqtt_ftps is the legacy direct MQTT/FTPS path; bambu_network uses the FULU bridge."
+                  enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "bambu_connect", "signed_mqtt"],
+                  description: "Print path: signed_mqtt uses verified internal 3MF transfer followed by configured signed MQTT; bambu_connect hands a printable file to the signed-in Bambu Connect app for cloud-mode review; X2D otherwise defaults to bambu_native (Bambu Studio's installed local networking plug-in, storing the job on a ready SD card or USB stick, otherwise internal eMMC); X1C may opt in to bambu_native, for example when its firmware refuses FTPS uploads with 553; lan_mqtt_ftps is the legacy direct MQTT/FTPS path; bambu_network uses the FULU bridge."
                 },
                 try_emmc_print: { type: "boolean", description: "X2D native printing: true stores the job on internal storage (eMMC), false on the SD card or USB stick (refused unless the printer reports one ready). Omit to use the card when ready, else eMMC; X1C requires fresh advertised internal-printing support before using eMMC. BAMBU_NATIVE_TRY_EMMC_PRINT sets a server default." },
                 connection_type: { type: "string", enum: ["cloud", "lan"], description: "BambuNetwork connection type when connection_mode is bambu_network; cloud uses restored internet printing, lan uses local bridge printing." },
@@ -3889,7 +3977,7 @@ export class BambuPrinterMCPServer {
       let nativeUnavailable: string | null | undefined;
       const nativeUnavailableReason = () =>
         (nativeUnavailable ??= x2dTarget ? bambuNativeUnavailableReason() ?? null : "The selected printer is not an X2D.");
-      const signedRequested = () => signedControlsRequested(process.env);
+      const signedRequested = () => signedControlsRequested(process.env) || resolveConnection(args).mode === "signed_mqtt";
       const nativeControls = () => signedRequested() || nativeUnavailableReason() === null;
       // Linux sent X2D stop and heater-off over MQTT before the native route
       // existed. Send them over both routes there: a stuck helper must not
@@ -4031,6 +4119,8 @@ export class BambuPrinterMCPServer {
               printerSerialConfigured: Boolean(DEFAULT_BAMBU_SERIAL),
               printerTokenConfigured: Boolean(DEFAULT_BAMBU_TOKEN),
               printerModelConfigured: Boolean(DEFAULT_BAMBU_MODEL),
+              signedPrintSelected: DEFAULT_BAMBU_CONNECTION_MODE === "signed_mqtt",
+              printerTlsCaConfigured: Boolean(process.env.BAMBU_PRINTER_TLS_CA_FILE?.trim() && path.isAbsolute(process.env.BAMBU_PRINTER_TLS_CA_FILE.trim())),
               ...signedReadinessContext(),
             });
             break;
@@ -4225,12 +4315,16 @@ export class BambuPrinterMCPServer {
             if (!args?.filename) {
               throw new Error("Missing required parameter: filename");
             }
+            if (resolveConnection(args).mode === "signed_mqtt") throw new Error("signed_mqtt internal upload supports inspected 3MF projects only; no file was uploaded.");
             const uploadSource = resolveUploadGcodeSource(args as Record<string, unknown>);
             try {
               const uploadModel = await this.resolveBambuModel(args?.bambu_model as string | undefined);
-              result = await this.bambu.uploadFile(
-                host, bambuSerial, bambuToken, uploadSource.filePath, String(args.filename), false, uploadModel
-              );
+              const route = resolveConnection(args, uploadModel).mode;
+              if (route === "signed_mqtt") {
+                result = await this.uploadFileViaSignedInternal(uploadSource.filePath, String(args.filename), uploadModel, host, bambuSerial, bambuToken, extra.signal);
+              } else {
+                result = await this.bambu.uploadFile(host, bambuSerial, bambuToken, uploadSource.filePath, String(args.filename), false, uploadModel);
+              }
             } finally {
               if (uploadSource.cleanupDir) {
                 fs.rmSync(uploadSource.cleanupDir, { recursive: true, force: true });
@@ -4243,7 +4337,11 @@ export class BambuPrinterMCPServer {
             if (!args?.file_path || !args?.filename) {
               throw new Error("Missing required parameters: file_path and filename");
             }
-            if (String(args?.connection_mode || "").trim().toLowerCase() === "bambu_native") {
+            if (resolveConnection(args).mode === "signed_mqtt") {
+              if (args.print) throw new Error("Signed internal upload never starts printing; use print_3mf.");
+              const model = await this.resolveBambuModel(args?.bambu_model as string | undefined);
+              result = await this.uploadFileViaSignedInternal(String(args.file_path), String(args.filename), model, host, bambuSerial, bambuToken, extra.signal);
+            } else if (String(args?.connection_mode || "").trim().toLowerCase() === "bambu_native") {
               result = await this.uploadFileViaBambuNative(
                 args as Record<string, any>, host, bambuSerial, bambuToken, reportNativeUpdate, extra.signal
               );
@@ -4263,6 +4361,7 @@ export class BambuPrinterMCPServer {
 
           case "start_print":
           case "start_print_job": {
+            if (signedRequested()) throw new Error("Signed controls do not support raw gcode_file start. Use a checked print_3mf route; nothing was sent.");
             if (!args?.filename) {
               throw new Error("Missing required parameter: filename");
             }
@@ -4865,6 +4964,10 @@ export class BambuPrinterMCPServer {
               result = await this.print3mfViaBambuNetwork(resolvedArgs, host, bambuSerial, bambuToken);
               break;
             }
+            if (effectiveConnectionMode === "signed_mqtt") {
+              result = await this.print3mfViaBambuNetwork({ ...resolvedArgs, connection_type: "lan", bambu_network_method: "start_local_print" }, host, bambuSerial, bambuToken, { signal: extra.signal, signed: true });
+              break;
+            }
             if (effectiveConnectionMode === "bambu_native") {
               result = await this.print3mfViaBambuNative(
                 resolvedArgs, host, bambuSerial, bambuToken, reportNativeUpdate, extra.signal
@@ -5382,12 +5485,15 @@ export class BambuPrinterMCPServer {
             ? "Check the printer and current job before any retry. Do not automatically resend an uncertain native operation."
             : error instanceof PrinterMqttConnectionError
               ? "Check the printer's connection and selected route, then perform fresh safety checks before any deliberate new print. Do not automatically resend."
+            : error instanceof VerifiedUploadDispatchError
+              ? "Check printer status and the current job before any deliberate new print. Do not automatically resend."
             : refused
               ? `Retrying unchanged repeats this refusal. Fix the reported cause (file, arguments, printer settings, or printer state) first. Error: ${message}`
               : `Check parameters and try again. Error: ${message}`,
           message,
           tool: name,
           ...(error instanceof NativeOperationError ? { native_diagnostics: error.diagnostics } : {}),
+          ...(error instanceof VerifiedUploadDispatchError ? { verified_upload: error.upload } : {}),
           ...(error instanceof PrinterMqttConnectionError ? { connection_diagnostics: error.diagnostics, ...(error.safetyStage ? { safety_stage: error.safetyStage } : {}) } : {}),
           ...(error instanceof PrinterRefusal ? { code: error.code } : error instanceof NativeOperationError && error.refusalCode ? { code: error.refusalCode } : {}), ...(["print_3mf", "upload_gcode"].includes(name) ? { printOutcome: printOutcome(error) } : {}),
           // The slicer's own result.json; the message starts with its error_string and warnings.

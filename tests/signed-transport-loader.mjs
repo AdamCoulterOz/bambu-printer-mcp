@@ -4,7 +4,7 @@ import { appendFileSync } from 'node:fs';
 export function connect(url, options) {
   const client = new EventEmitter(); client.connected = false;
   client.subscribe = (topic, opts, cb) => { appendFileSync(process.env.SIGNED_TEST_LOG, JSON.stringify({subscribe:topic})+'\\n'); cb(null,[{topic,qos:1}]); };
-  client.publish = (topic,payload,opts,cb) => { const value=JSON.parse(String(payload)); appendFileSync(process.env.SIGNED_TEST_LOG, JSON.stringify({topic,value,opts})+'\\n'); cb(); if(value.security) queueMicrotask(()=>client.emit('message',topic.replace('/request','/report'),Buffer.from('{"security":{"sequence_id":"1"}}'), {retain:false})); };
+  client.publish = (topic,payload,opts,cb) => { const value=JSON.parse(String(payload)); appendFileSync(process.env.SIGNED_TEST_LOG, JSON.stringify({topic,value,opts})+'\\n'); if(value.signed && process.env.SIGNED_TEST_PUBLISH_FAIL==='1') return cb(new Error('mock write failure')); cb(); if(value.security) queueMicrotask(()=>client.emit('message',topic.replace('/request','/report'),Buffer.from('{"security":{"sequence_id":"1"}}'), {retain:false})); };
   client.end = () => { client.connected=false;client.emit('close'); };
   queueMicrotask(()=>{client.connected=true;client.emit('connect');}); return client;
 }`;

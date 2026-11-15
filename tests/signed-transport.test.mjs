@@ -362,3 +362,24 @@ test('signed readiness reports only static configuration shape without contactin
   result=await readiness({...common,BAMBU_SIGNED_WRITE_TRANSPORT:'local'});assert.deepEqual(result.signed_controls,{selected:'selected',configuration:'available'});assert.equal(result.capabilities.signed_mqtt,'unknown');
   result=await readiness({...common,BAMBU_SIGNED_WRITE_TRANSPORT:'cloud',BAMBU_SIGNED_CLOUD_AUTH:'account'});assert.deepEqual(result.signed_controls,{selected:'selected',configuration:'unknown'});
 });
+
+test('dispatch hook runs synchronously immediately before command publish', async () => {
+  const events = [];
+  const { mqtt, transport } = setup({ beforePublish: async () => events.push('checked'), onPublish: () => events.push('hook') });
+  const publish = mqtt.publish.bind(mqtt);
+  mqtt.publish = (topic, payload, options, cb) => { if (mqtt.published.length) events.push('publish'); return publish(topic, payload, options, cb); };
+  await transport.send({command:'stop'});
+  assert.deepEqual(events, ['checked', 'hook', 'publish']);
+});
+
+test('cancel during final safety check cannot run dispatch hook or command publish later', async () => {
+  let release, hooks=0;
+  const { mqtt, transport } = setup({ timeoutMs:500, beforePublish: () => new Promise(resolve => { release=resolve; }), onPublish: () => { hooks++; } });
+  const abort = new AbortController();
+  const pending = transport.send({command:'stop'}, abort.signal);
+  while (!release) await new Promise(resolve => setTimeout(resolve, 1));
+  abort.abort(new Error('cancelled'));
+  await assert.rejects(pending, /cancelled/);
+  release(); await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(hooks, 0); assert.equal(mqtt.published.length, 1);
+});

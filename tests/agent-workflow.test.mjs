@@ -24,6 +24,14 @@ test("readiness is a pure, conservative local summary", () => {
   assert.equal(blocked.signed_controls.configuration, "missing");
   assert.ok(blocked.blockers.some(({code}) => code === "signed_configuration"));
   assert.equal(result.capabilities.signed_mqtt, "unknown");
+  const selectedPrint = getAgentReadiness({ signedPrintSelected: true, printerTlsCaConfigured: false, signedControlsSelected: false });
+  assert.equal(selectedPrint.signed_print.printer_tls_ca, "missing");
+  assert.ok(selectedPrint.blockers.some(({code}) => code === "printer_tls_ca"));
+  assert.ok(selectedPrint.blockers.some(({code}) => code === "signed_print_signer"));
+  const otherRoute = getAgentReadiness({ signedPrintSelected: false, printerTlsCaConfigured: false, signedControlsSelected: false });
+  assert.ok(!otherRoute.blockers.some(({code}) => code === "printer_tls_ca" || code === "signed_print_signer"));
+  const unknownSigner = getAgentReadiness({ signedPrintSelected: true });
+  assert.equal(unknownSigner.blockers.find(({code}) => code === "signed_print_signer").state, "unknown");
   assert.match(AGENT_WORKFLOW_TEXT, /--min-save.*SLICED.*does not resolve incomplete profiles/);
   const setup = getAgentGuideResource("bambu://workflow/setup");
   const signing = getAgentGuideResource("bambu://workflow/signing");
@@ -42,12 +50,17 @@ test("readiness is a pure, conservative local summary", () => {
   assert.match(slicing, /cannot currently be established through these MCP tools/);
   assert.match(slicing, /Rely on these checks within their documented scope/);
   assert.match(slicing, /--min-save is an export-format option, not a profile-resolution repair/);
+  const dispatch = getAgentGuideResource("bambu://workflow/dispatch");
+  assert.match(dispatch, /use upload_file/);
+  assert.match(dispatch, /upload_gcode is raw G-code only and always refuses this route/);
   const controls = getAgentGuideResource("bambu://workflow/controls");
   for (const method of ["bridge.handshake", "net.is_user_login", "net.get_user_id", "net.get_user_name", "net.get_user_avatar", "net.get_user_nickanme"]) assert.ok(controls.includes(method));
   assert.match(controls, /Raw bridge mutations are refused/);
   assert.match(controls, /Selected signed mode does not permit a raw bypass/);
   assert.match(AGENT_WORKFLOW_TEXT, /never automatically fall back/);
-  assert.match(AGENT_WORKFLOW_TEXT, /signing does not upload/);
+  assert.match(AGENT_WORKFLOW_TEXT, /Signing alone does not upload/);
+  assert.match(AGENT_WORKFLOW_TEXT, /inspected 3MF projects/);
+  assert.match(AGENT_WORKFLOW_TEXT, /BAMBU_PRINTER_TLS_CA_FILE/);
 });
 
 test("MCP exposes workflow and successful structured blocked readiness without secrets", async t => {
@@ -78,7 +91,7 @@ test("MCP exposes workflow and successful structured blocked readiness without s
   }
   const signingGuide = await client.callTool({name: "get_agent_guide", arguments: {topic: "signing"}});
   const signingFields = signingGuide.structuredContent.configuration_fields;
-  const expectedSigningEnv = ["BAMBU_SIGNED_CONTROLS", "BAMBU_SIGNED_WRITE_TRANSPORT", "BAMBU_SIGNING_DIR", "BAMBU_SIGNING_DEVICE_CA_FILE", "BAMBU_SIGNING_STATE_DIR", "BAMBU_SIGNED_LOCAL_TLS_CA_FILE", "BAMBU_SIGNED_LOCAL_TLS_SERVERNAME", "BAMBU_SIGNED_CLOUD_BROKER", "BAMBU_SIGNED_CLOUD_USERNAME", "BAMBU_SIGNED_CLOUD_TOKEN", "BAMBU_SIGNED_CLOUD_AUTH"];
+  const expectedSigningEnv = ["BAMBU_PRINTER_TLS_CA_FILE", "BAMBU_SIGNED_CONTROLS", "BAMBU_SIGNED_WRITE_TRANSPORT", "BAMBU_SIGNING_DIR", "BAMBU_SIGNING_DEVICE_CA_FILE", "BAMBU_SIGNING_STATE_DIR", "BAMBU_SIGNED_LOCAL_TLS_CA_FILE", "BAMBU_SIGNED_LOCAL_TLS_SERVERNAME", "BAMBU_SIGNED_CLOUD_BROKER", "BAMBU_SIGNED_CLOUD_USERNAME", "BAMBU_SIGNED_CLOUD_TOKEN", "BAMBU_SIGNED_CLOUD_AUTH"];
   assert.deepEqual(signingFields.map(field => field.env).sort(), expectedSigningEnv.sort());
   assert.equal(signingFields.find(field => field.env === "BAMBU_SIGNED_CLOUD_TOKEN").input, "secret");
   assert.match(signingGuide.structuredContent.text, /bambu-printer-mcp-signing-setup --repair/);

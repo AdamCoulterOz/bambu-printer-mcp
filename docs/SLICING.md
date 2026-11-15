@@ -4,6 +4,8 @@
 
 H2D Pro uses `BAMBU_MODEL=h2dpro` and requires the selected slicer installation’s exact `Bambu Lab H2D Pro <nozzle> nozzle` preset. Offline tests cover model selection, preset preparation and mocked external-spool dispatch; physical H2D Pro printing is not verified. Do not substitute `h2d`.
 
+The candidate `signed_mqtt` route accepts inspected 3MF projects including `.gcode.3mf`; its upload-only tool is `upload_file`. `upload_gcode` refuses this route. Configure its signer and separate absolute `BAMBU_PRINTER_TLS_CA_FILE`; verified storage readback and final preflight do not establish a physical print. See [the route guide](../README.md#experimental-signed-mqtt-project-route). It is not yet deployed or live-qualified.
+
 ## TL;DR
 
 For offline prepared-file evidence, call `inspect_print_file` with `file_path`, explicit `bambu_model`, and optional zero-based `plate_index`, `nozzle_diameters` and `bed_type`. It inspects a private read-only snapshot using the existing safety engine and returns a versioned SHA/byte-length/plate receipt, declarations and checked temperature peaks. It neither contacts a printer nor slices input. `evidence: "file-only"` and `dispatch_authorized: false` mean the result cannot replace fresh printer preflight or human authorization; actual printing independently checks its final dispatched snapshot.

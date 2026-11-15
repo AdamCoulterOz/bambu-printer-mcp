@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add the candidate explicit `signed_mqtt` 3MF route: separately configured printer-storage TLS, capability and collision checks, upload and full size/SHA-256 readback, followed by checked signed MQTT project dispatch. `upload_file` supports upload-only; raw `upload_gcode` refuses this route. No automatic fallback or replay; this route is not yet deployed or live-qualified.
+
 - Add `get_printer_status({fresh:true})` for read-only fresh MQTT identity, state and error telemetry with a matching printer-returned serial and observation timestamps. Preserve default display status and existing internal print preflight behavior; this read does not authorize dispatch.
 
 - Share one printer backend among independent stateful HTTP MCP sessions and add a private-token stdio-to-HTTP client relay. Session closure leaves the backend running; `MCP_HTTP_STATEFUL=false` now fails startup.

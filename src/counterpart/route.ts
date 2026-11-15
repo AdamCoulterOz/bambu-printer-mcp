@@ -23,7 +23,7 @@ export interface RouteOption {
 }
 
 /** Modes that are their own local-network route and stay as configured. */
-const OWN_LOCAL_MODES = new Set(["bambu_native", "bambu_connect"]);
+const OWN_LOCAL_MODES = new Set(["bambu_native", "bambu_connect", "signed_mqtt"]);
 
 export function routeOf(connection: Connection): PrintRoute {
   if (connection.mode === "bambu_network") return connection.type === "cloud" ? "cloud" : "lan";

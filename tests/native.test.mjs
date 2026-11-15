@@ -17,7 +17,7 @@ const printerModule = new URL("../dist/printers/bambu.js", import.meta.url).href
 
 // Exercise platform dispatch on every CI OS. Only the OS selector and transport
 // boundaries are mocked; file inspection, AMS validation and preflight are real.
-async function server(t, { platform = "darwin", model = "x2d", state = "IDLE", gcode = "G1 X0 Y0\n", decline = false, helperDelay = 0, ignoreTerm = false, dispatchState, dispatchError, installedHelper = true, installedPlugin = true, tunnelLibrary = true, arch = "x64", unpinnedOptIn = true, helperFails = false, crashAfterDispatch = false, mqttFails = false, mqttHangs = false, mqttDelay = 0, mqttFirstConnectionOffline = false, hms = [], storage = {}, dispatchStorage, env = {}, printer = "x2d", resumeAfterPrint = false, safetyConnectionFailAt = 0 } = {}) {
+async function server(t, { platform = "darwin", model = "x2d", state = "IDLE", gcode = "G1 X0 Y0\n", decline = false, helperDelay = 0, ignoreTerm = false, dispatchState, dispatchError, installedHelper = true, installedPlugin = true, tunnelLibrary = true, arch = "x64", unpinnedOptIn = true, helperFails = false, crashAfterDispatch = false, mqttFails = false, mqttHangs = false, mqttDelay = 0, mqttFirstConnectionOffline = false, hms = [], storage = {}, dispatchStorage, env = {}, printer = "x2d", resumeAfterPrint = false, safetyConnectionFailAt = 0, signedInternal = false, missingNozzleMapping = false } = {}) {
   // The printer the plate is sliced for and the fresh report describes; model only sets BAMBU_MODEL.
   const x1c = printer === "x1c";
   const dir = await trackedMkdtemp(path.join(os.tmpdir(), "bambu-native-test-"));
@@ -67,7 +67,7 @@ console.log('native_print result=0');
   zip.file("3D/3dmodel.model", '<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources/><build/></model>');
   zip.file("Metadata/plate_1.gcode", x1c
     ? `; printer_model = Bambu Lab X1 Carbon\n; nozzle_diameter = 0.4\n; filament_type = PLA\n; curr_bed_type = Textured PEI Plate\n; filament_colour = #FFFFFF\n${gcode}`
-    : `; printer_model = Bambu Lab X2D\n; nozzle_diameter = 0.4;0.4\n; filament_type = PLA\n; filament_map = 1\n; physical_extruder_map = 1,0\n; curr_bed_type = Textured PEI Plate\n; filament_colour = #FFFFFF\n${gcode}`);
+    : `; printer_model = Bambu Lab X2D\n; nozzle_diameter = 0.4;0.4\n; filament_type = PLA\n; filament_map = 1\n${missingNozzleMapping ? "" : "; physical_extruder_map = 1,0\n"}; curr_bed_type = Textured PEI Plate\n; filament_colour = #FFFFFF\n${gcode}`);
   zip.file("Metadata/plate_1.json", JSON.stringify({ filament_ids: [0] }));
   await fs.writeFile(file, await zip.generateAsync({ type: "nodebuffer" }));
   const preload = `
@@ -136,9 +136,11 @@ console.log('native_print result=0');
         observation:{source:'mqtt',requestedAt:Date.now()-1,receivedAt:Date.now(),identitySource:'report'} };
     };
   `;
+  const signedCa = path.join(dir, "test-ca.pem");
+  await fs.writeFile(signedCa, "test trust");
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["--import", `data:text/javascript,${encodeURIComponent(preload)}`, entry], cwd: dir,
+    args: [...(signedInternal ? ["--experimental-loader", fileURLToPath(new URL("./signed-internal-loader.mjs", import.meta.url))] : []), "--import", `data:text/javascript,${encodeURIComponent(preload)}`, entry], cwd: dir,
     env: { ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: model, BAMBU_PRINTER_MODEL: "",
       BAMBU_PRINTER_HOST: "127.0.0.1", BAMBU_PRINTER_SERIAL: x1c ? "00MTEST" : "20PTEST", BAMBU_PRINTER_ACCESS_TOKEN: "DUMMY",
       // An empty private home keeps a developer's real Linux setup out of the test.
@@ -147,7 +149,8 @@ console.log('native_print result=0');
       ...(unpinnedOptIn ? UNPINNED_PLUGIN_ENV : { BAMBU_NATIVE_ALLOW_UNPINNED_PLUGIN: "" }),
       BAMBU_DEFAULT_CONNECTION_MODE: "", BAMBU_EMERGENCY_MQTT_TIMEOUT_MS: "500", BAMBU_NATIVE_TRY_EMMC_PRINT: undefined,
       // Each server keeps its own resume records: a job another test started must never be resumable here.
-      BAMBU_RESUME_STATE_DIR: await trackedMkdtemp(path.join(os.tmpdir(), "bambu-resume-server-")), ...env }, stderr: "pipe",
+      BAMBU_RESUME_STATE_DIR: await trackedMkdtemp(path.join(os.tmpdir(), "bambu-resume-server-")),
+      ...(signedInternal ? { SIGNED_TEST_LOG:eventsFile, BAMBU_SIGNED_CONTROLS:"true", BAMBU_SIGNING_DIR:dir, BAMBU_SIGNING_DEVICE_CA_FILE:signedCa, BAMBU_SIGNING_STATE_DIR:dir, BAMBU_SIGNED_WRITE_TRANSPORT:"local", BAMBU_PRINTER_TLS_CA_FILE:signedCa } : {}), ...env }, stderr: "pipe",
   });
   const client = new Client({ name: "native-regression", version: "0" }, { capabilities: { elicitation: { form: {} } } });
   const prompts = [];
@@ -949,4 +952,88 @@ test('shared MQTT connection errors retain independent preflight stages',async()
   assert.notEqual(initial,shared);assert.notEqual(confirmation,shared);assert.notEqual(initial,confirmation);
   assert.equal(shared.safetyStage,undefined);assert.equal(initial.safetyStage,'initial_safety');assert.equal(confirmation.safetyStage,'confirmation_safety');
   assert.ok(Object.isFrozen(shared.diagnostics));assert.deepEqual(initial.diagnostics,confirmation.diagnostics);
+});
+
+
+test("signed internal print uses inspected X2D nozzle mapping and final safety gate", async t => {
+  const s = await server(t, {signedInternal:true});
+  const result = await s.client.callTool({name:"print_3mf",arguments:{three_mf_path:s.file,bambu_model:"x2d",connection_mode:"signed_mqtt",ams_slots:[0]}});
+  assert.notEqual(result.isError,true,JSON.stringify(result));
+  const events = (await fs.readFile(path.join(s.dir,"events.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
+  const uploaded=events.findIndex(e=>e.kind==="verified-upload"), signed=events.findIndex(e=>e.value?.signed?.command==="project_file");
+  assert.ok(uploaded>=0 && signed>uploaded); assert.ok(events.slice(uploaded+1,signed).some(e=>e.kind==="status"));
+  const cmd=events[signed].value.signed;
+  assert.deepEqual(cmd.nozzle_mapping,[1]); assert.deepEqual(cmd.ams_mapping,[0]); assert.equal(cmd.param,"Metadata/plate_1.gcode");
+  assert.match(cmd.url,/^brtc:\/\/emmc\/checked-/); assert.equal(cmd.md5,"from_sd_card");
+  assert.ok(!events.some(e=>e.kind==="ftp" || e.kind==="helper"));
+});
+
+test("signed internal failed final safety keeps receipt and sends no print command", async t => {
+  const s = await server(t, {signedInternal:true, safetyConnectionFailAt:3});
+  const result = await s.client.callTool({name:"print_3mf",arguments:{three_mf_path:s.file,bambu_model:"x2d",connection_mode:"signed_mqtt",ams_slots:[0]}});
+  assert.equal(result.isError,true); assert.equal(result.structuredContent.printOutcome,"not-sent");
+  assert.equal(result.structuredContent.verified_upload.verifiedBy,"readback");
+  const events=(await fs.readFile(path.join(s.dir,"events.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
+  assert.ok(events.some(e=>e.kind==="verified-upload")); assert.ok(!events.some(e=>e.value?.signed?.command==="project_file"));
+});
+
+test('signed internal failed publish preserves receipt and reports uncertain dispatch', async t => {
+  const s = await server(t, {signedInternal:true, env:{SIGNED_TEST_PUBLISH_FAIL:'1'}});
+  const result = await s.client.callTool({name:'print_3mf',arguments:{three_mf_path:s.file,bambu_model:'x2d',connection_mode:'signed_mqtt',ams_slots:[0]}});
+  assert.equal(result.isError,true); assert.equal(result.structuredContent.printOutcome,'unknown');
+  assert.equal(result.structuredContent.verified_upload.verifiedBy,'readback');
+  const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter(e=>e.value?.signed?.command==='project_file').length,1);
+});
+
+test('signed internal upload_file inspects 3MF and never prints', async t => {
+  const s=await server(t, {signedInternal:true});
+  const result=await s.client.callTool({name:'upload_file',arguments:{filename:'safe.3mf',file_path:s.file,bambu_model:'x2d',connection_mode:'signed_mqtt'}});
+  assert.notEqual(result.isError,true,JSON.stringify(result));
+  const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.ok(events.some(e=>e.kind==='status')); assert.ok(events.some(e=>e.kind==='verified-upload'));
+  assert.ok(!events.some(e=>e.value?.signed || e.kind==='ftp' || e.kind==='helper'));
+});
+
+test('signed internal raw G-code upload refuses before transfer', async t => {
+  const s=await server(t, {signedInternal:true});
+  const result=await s.client.callTool({name:'upload_gcode',arguments:{filename:'safe.gcode',gcode:'G1 X0 Y0\n',bambu_model:'x2d',connection_mode:'signed_mqtt'}});
+  assert.equal(result.isError,true); assert.match(result.content[0].text,/3MF projects only/);
+  const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(!events.some(e=>e.kind==='verified-upload' || e.value?.signed || e.kind==='ftp' || e.kind==='helper'));
+});
+
+test('signed internal refuses ambiguous physical nozzle map before upload', async t => {
+  const s=await server(t,{signedInternal:true,missingNozzleMapping:true});
+  const result=await s.client.callTool({name:'print_3mf',arguments:{three_mf_path:s.file,bambu_model:'x2d',connection_mode:'signed_mqtt',ams_slots:[0]}});
+  assert.equal(result.isError,true); assert.equal(result.structuredContent.printOutcome,'not-sent');
+  const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(!events.some(e=>e.kind==='verified-upload' || e.value?.signed || e.kind==='helper'));
+});
+
+test('selected signed internal route with signing disabled refuses without fallback', async t => {
+  const s=await server(t,{signedInternal:true,env:{BAMBU_SIGNED_CONTROLS:'false',BAMBU_DEFAULT_CONNECTION_MODE:'signed_mqtt'}});
+  const result=await s.client.callTool({name:'print_3mf',arguments:{three_mf_path:s.file,bambu_model:'x2d',ams_slots:[0]}});
+  assert.equal(result.isError,true);assert.equal(result.structuredContent.printOutcome,'not-sent');
+  const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(!events.some(e=>e.kind==='verified-upload' || e.value?.signed || e.kind==='helper' || e.kind==='ftp'));
+});
+
+
+test('signed internal upload binds transfer to the inspected snapshot hash', async t => {
+  const s=await server(t, {signedInternal:true,env:{SIGNED_TEST_MUTATE:'1'}});
+  const result=await s.client.callTool({name:'upload_file',arguments:{filename:'safe.3mf',file_path:s.file,bambu_model:'x2d',connection_mode:'signed_mqtt'}});
+  assert.equal(result.isError,true); assert.match(result.content[0].text,/snapshot changed/);
+  const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(!events.some(e=>e.value?.signed || e.kind==='ftp' || e.kind==='helper'));
+});
+
+test('selected signed internal readiness exposes only local configuration shape', async t => {
+  const s=await server(t,{signedInternal:true,env:{BAMBU_DEFAULT_CONNECTION_MODE:'signed_mqtt',BAMBU_PRINTER_TLS_CA_FILE:''}});
+  const result=await s.client.callTool({name:'get_agent_readiness',arguments:{}});
+  assert.notEqual(result.isError,true); assert.equal(result.structuredContent.signed_print.selected,'selected');
+  assert.equal(result.structuredContent.signed_print.printer_tls_ca,'missing');
+  assert.ok(result.structuredContent.blockers.some(entry=>entry.code==='printer_tls_ca'));
+  const events=(await fs.readFile(path.join(s.dir,'events.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  assert.deepEqual(events,[]);
 });

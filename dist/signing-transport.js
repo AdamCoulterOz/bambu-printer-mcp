@@ -138,14 +138,15 @@ export class SignedTransport {
             }));
             await wait(installed);
             guard();
+            const payload = await wait(session.signCommand(command));
             if (this.options.beforePublish)
                 await wait(this.options.beforePublish());
             await wait(authorize());
             guard();
-            const payload = await wait(session.signCommand(command));
-            await wait(authorize());
-            guard();
-            await wait(new Promise((resolve, reject) => connection.publish(request, payload, { qos: 1, retain: false }, error => error ? reject(new Error("Signed MQTT publish failed; check printer status before retrying.")) : resolve())));
+            await wait(new Promise((resolve, reject) => {
+                this.options.onPublish?.();
+                connection.publish(request, payload, { qos: 1, retain: false }, error => error ? reject(new Error("Signed MQTT publish failed; check printer status before retrying.")) : resolve());
+            }));
         }
         finally {
             clearTimeout(timer);
@@ -193,13 +194,13 @@ export function signedControlConfiguration(env, host, lanToken) {
 }
 /** A process-wide queue per printer prevents two independently-created writers racing. */
 const printerQueues = new Map();
-export async function sendSignedControl(config, serial, command, signal, beforePublish, assertActive) {
-    return sendConfigured(config, serial, command, undefined, signal, beforePublish, assertActive);
+export async function sendSignedControl(config, serial, command, signal, beforePublish, assertActive, onPublish) {
+    return sendConfigured(config, serial, command, undefined, signal, beforePublish, assertActive, onPublish);
 }
 export async function sendTypedLight(config, serial, light, mode, signal) {
     return sendConfigured(config, serial, undefined, { light, mode }, signal);
 }
-async function sendConfigured(config, serial, command, light, signal, beforePublish, assertActive) {
+async function sendConfigured(config, serial, command, light, signal, beforePublish, assertActive, onPublish) {
     const previous = printerQueues.get(serial) ?? Promise.resolve();
     const work = previous.catch(() => { }).then(async () => {
         signal?.throwIfAborted();
@@ -253,7 +254,7 @@ async function sendConfigured(config, serial, command, light, signal, beforePubl
         assertActive?.();
         const writer = new SignedTransport({ serial, url: config.url, username: config.username, password: config.password,
             sessionFactory: () => createSigningSession({ serial, operatorPemDirectory: config.operatorPemDirectory, deviceTrustPem, sequenceStore: config.sequenceStore }),
-            beforePublish, assertActive, tlsCa, tlsServername: config.localTlsServername, accountGuard: config.accountGuard,
+            beforePublish, assertActive, onPublish, tlsCa, tlsServername: config.localTlsServername, accountGuard: config.accountGuard,
         });
         if (light)
             await writer.sendLight(light.light, light.mode, signal);

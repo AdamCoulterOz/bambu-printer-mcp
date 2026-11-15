@@ -9,7 +9,7 @@ import { constants, publicEncrypt, sign } from "node:crypto";
 const common = ["command", "sequence_id"];
 const fields = {
     gcode_line: [...common, "param"],
-    project_file: [...common, "param", "url", "file", "md5", "bed_type", "timelapse", "bed_leveling", "auto_bed_leveling", "flow_cali", "vibration_cali", "layer_inspect", "use_ams", "cfg", "extrude_cali_flag", "extrude_cali_manual_mode", "nozzle_offset_cali", "subtask_name", "profile_id", "project_id", "subtask_id", "task_id", "ams_mapping", "ams_mapping2"],
+    project_file: [...common, "param", "url", "file", "md5", "bed_type", "timelapse", "bed_leveling", "auto_bed_leveling", "flow_cali", "vibration_cali", "layer_inspect", "use_ams", "cfg", "extrude_cali_flag", "extrude_cali_manual_mode", "nozzle_offset_cali", "subtask_name", "profile_id", "project_id", "subtask_id", "task_id", "ams_mapping", "ams_mapping2", "nozzle_mapping"],
     pause: [...common, "param"], resume: [...common, "param"], stop: [...common, "param"],
     clean_print_error: [...common], print_speed: [...common, "param"],
     set_airduct: [...common, "modeId", "submode"], ams_get_rfid: [...common, "ams_id", "slot_id"],
@@ -26,6 +26,8 @@ export function encodeSignedPrint(command, certId, appPrivateKey, devicePublicKe
         throw new Error("Unsupported signed command field");
     if (command.command === "ams_control" && (!Number.isInteger(command.ams_id) || Number(command.ams_id) < 0 || (Number(command.ams_id) > 3 && command.ams_id !== 128) || !["start_drying", "stop_drying"].includes(String(command.param))))
         throw new Error("Invalid AMS drying command");
+    if (command.command === "project_file" && command.nozzle_mapping !== undefined && (!Array.isArray(command.nozzle_mapping) || command.nozzle_mapping.length < 1 || command.nozzle_mapping.length > 64 || command.nozzle_mapping.some(value => !Number.isInteger(value) || Number(value) < 0 || Number(value) > 1)))
+        throw new Error("Invalid nozzle mapping");
     const payload = { ...command };
     const sensitive = command.command === "gcode_line" ? "param" : command.command === "project_file" ? "url" : undefined;
     if (sensitive) {

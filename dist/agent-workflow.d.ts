@@ -7,7 +7,7 @@ export declare const AGENT_WORKFLOW_RESOURCE: {
     description: string;
     mimeType: string;
 };
-export declare const AGENT_WORKFLOW_TEXT = "Printing workflow\n\n1. Identify the intended printer and verify its model, nozzle configuration, bed and current AMS inventory. Use counterpart_setup_fields for setup and counterpart_printer_info for configured capabilities; get_printer_status and get_printer_filaments supply observed printer information. Do not guess the model or treat configured identity as live evidence.\n2. Prepare the requested artifact for that exact printer. A pre-sliced file does not need a local slicer. Use slice_stl and the installed matching model/nozzle presets when slicing is needed. For offline slicer CLI exports, --min-save concerns the SLICED export format with plate G-code; it does not resolve incomplete profiles. An unsliced geometry 3MF is not a printable export. Preserve the intended project and selected plate; do not resume or reslice an unexpected file.\n3. Use list_3mf_plates and inspect_print_file for the exact file and selected plate. Check its semantic metadata, including plate metadata, machine, nozzles, materials and bed, and the computed artifact/G-code hash as applicable. For dual-nozzle jobs compose the selected plate's filament mapping with physical extruder mapping and the current physical AMS/external-tray assignments. File-only inspection is not authorization and does not establish live printer safety or physical spool contents.\n4. Check fresh observed printer identity, nozzle configuration, state and actionable errors. The existing print tool independently checks its final immutable file snapshot, selected plate, temperatures, material mapping and fresh printer safety evidence. Follow its refusals and any specific existing elicitation requirements. Local readiness and successful file inspection cannot replace these gates.\n5. Consult the selected print tool's input schema for the model and required options. Act on the person's request to print; ordinary print starts do not require an extra MCP prompt. Dispatch the exact checked file once. If dispatch is ambiguous, check fresh printer status and the device job before any retry; never automatically fall back to another route or replay.\n6. Monitor the fresh device job and report dispatch, actual running, first layer and completion as distinct observations. A publisher acknowledgement or helper receipt is not physical print success.\n\nX2D native printing uses a native helper and plug-in to store jobs on a ready SD card or USB stick, otherwise internal eMMC. Signed MQTT controls are separate from native file upload and printing; signing does not upload a file. Local helper or plug-in availability does not prove ABI compatibility, an authenticated session or device acceptance. Readiness below is configuration/capability evidence only, not live or physical readiness.";
+export declare const AGENT_WORKFLOW_TEXT = "Printing workflow\n\n1. Identify the intended printer and verify its model, nozzle configuration, bed and current AMS inventory. Use counterpart_setup_fields for setup and counterpart_printer_info for configured capabilities; get_printer_status and get_printer_filaments supply observed printer information. Do not guess the model or treat configured identity as live evidence.\n2. Prepare the requested artifact for that exact printer. A pre-sliced file does not need a local slicer. Use slice_stl and the installed matching model/nozzle presets when slicing is needed. For offline slicer CLI exports, --min-save concerns the SLICED export format with plate G-code; it does not resolve incomplete profiles. An unsliced geometry 3MF is not a printable export. Preserve the intended project and selected plate; do not resume or reslice an unexpected file.\n3. Use list_3mf_plates and inspect_print_file for the exact file and selected plate. Check its semantic metadata, including plate metadata, machine, nozzles, materials and bed, and the computed artifact/G-code hash as applicable. For dual-nozzle jobs compose the selected plate's filament mapping with physical extruder mapping and the current physical AMS/external-tray assignments. File-only inspection is not authorization and does not establish live printer safety or physical spool contents.\n4. Check fresh observed printer identity, nozzle configuration, state and actionable errors. The existing print tool independently checks its final immutable file snapshot, selected plate, temperatures, material mapping and fresh printer safety evidence. Follow its refusals and any specific existing elicitation requirements. Local readiness and successful file inspection cannot replace these gates.\n5. Consult the selected print tool's input schema for the model and required options. Act on the person's request to print; ordinary print starts do not require an extra MCP prompt. Dispatch the exact checked file once. If dispatch is ambiguous, check fresh printer status and the device job before any retry; never automatically fall back to another route or replay.\n6. Monitor the fresh device job and report dispatch, actual running, first layer and completion as distinct observations. A publisher acknowledgement or helper receipt is not physical print success.\n\nX2D native printing uses a native helper and plug-in to store jobs on a ready SD card or USB stick, otherwise internal eMMC. Signing alone does not upload a file. The explicit signed_mqtt print route combines inspected 3MF transfer and signed project dispatch; it requires an operator-configured signer and absolute BAMBU_PRINTER_TLS_CA_FILE. Pass connection_mode: \"signed_mqtt\" to the supported print tool or select it as the default. It verifies a unique internal-storage upload by size and SHA-256 readback before final fresh preflight and one signed dispatch. Unsupported capability, mappings or TLS fail closed, with no automatic fallback or replay. This route accepts inspected 3MF projects, including .gcode.3mf, not raw .gcode or other files. Model and firmware support is not universal. Local helper or plug-in availability does not prove ABI compatibility, an authenticated session or device acceptance. Readiness below is configuration/capability evidence only, not live or physical readiness.";
 export declare const AGENT_GUIDE_INDEX_URI = "bambu://workflow/index";
 export declare const AGENT_GUIDE_RESOURCES: {
     uri: string;
@@ -135,6 +135,8 @@ export interface AgentReadinessContext {
     signedMqttAvailable?: boolean;
     signedControlsSelected?: boolean;
     signedConfigurationValid?: boolean;
+    signedPrintSelected?: boolean;
+    printerTlsCaConfigured?: boolean;
 }
 type State = "available" | "missing" | "unknown";
 export declare function getAgentReadiness(context: AgentReadinessContext): {
@@ -150,6 +152,11 @@ export declare function getAgentReadiness(context: AgentReadinessContext): {
         state: State;
         next_action: string;
     }[];
+    signed_print: {
+        selected: "unknown" | "selected" | "not_selected";
+        printer_tls_ca: State;
+        signing_configuration: State;
+    };
     signed_controls: {
         selected: "unknown" | "selected" | "not_selected";
         configuration: State;
@@ -222,6 +229,25 @@ export declare const AGENT_READINESS_TOOL: {
                     readonly additionalProperties: false;
                 };
             };
+            readonly signed_print: {
+                readonly type: "object";
+                readonly properties: {
+                    readonly selected: {
+                        readonly type: "string";
+                        readonly enum: readonly ["selected", "not_selected", "unknown"];
+                    };
+                    readonly printer_tls_ca: {
+                        type: string;
+                        enum: string[];
+                    };
+                    readonly signing_configuration: {
+                        type: string;
+                        enum: string[];
+                    };
+                };
+                readonly required: readonly ["selected", "printer_tls_ca", "signing_configuration"];
+                readonly additionalProperties: false;
+            };
             readonly signed_controls: {
                 readonly type: "object";
                 readonly properties: {
@@ -266,7 +292,7 @@ export declare const AGENT_READINESS_TOOL: {
                 readonly type: "string";
             };
         };
-        readonly required: readonly ["scope", "dispatch_authorized", "physical_readiness_checked", "prerequisites", "blockers", "signed_controls", "capabilities", "next_actions", "limitations"];
+        readonly required: readonly ["scope", "dispatch_authorized", "physical_readiness_checked", "prerequisites", "blockers", "signed_print", "signed_controls", "capabilities", "next_actions", "limitations"];
         readonly additionalProperties: false;
     };
 };
