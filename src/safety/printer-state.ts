@@ -41,8 +41,13 @@ function observedIdentity(raw: Record<string, any>, configuredSerial: string) {
   return { model, observedSerial: serials[0], identitySource: hasReportedModel ? "report" : "module-serial" };
 }
 
+export interface FreshPrinterStatusOptions {
+  /** Identity probes require a printer-returned serial as well as an observed model. */
+  requireObservedSerial?: boolean;
+}
+
 /** Only raw reports received after this request are evidence. Never read printer.data here. */
-export function readFreshPrinterStatus(printer: BambuClient, serial: string, timeoutMs = 5000): Promise<any> {
+export function readFreshPrinterStatus(printer: BambuClient, serial: string, timeoutMs = 5000, options: FreshPrinterStatusOptions = {}): Promise<any> {
   return new Promise((resolve, reject) => {
     let raw: Record<string, any> = {};
     const requestedAt = Date.now();
@@ -66,7 +71,7 @@ export function readFreshPrinterStatus(printer: BambuClient, serial: string, tim
           !Object.prototype.hasOwnProperty.call(raw, "print_error") || !Object.prototype.hasOwnProperty.call(raw, "hms")) return;
       try {
         const identity = observedIdentity(raw, serial);
-        if (!identity.model) return;
+        if (!identity.model || (options.requireObservedSerial && !identity.observedSerial)) return;
         complete = true;
         cleanup();
         resolve({ connected: true, model: identity.model, status: raw.gcode_state, serial,

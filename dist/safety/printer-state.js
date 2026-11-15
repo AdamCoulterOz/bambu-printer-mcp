@@ -43,7 +43,7 @@ function observedIdentity(raw, configuredSerial) {
     return { model, observedSerial: serials[0], identitySource: hasReportedModel ? "report" : "module-serial" };
 }
 /** Only raw reports received after this request are evidence. Never read printer.data here. */
-export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
+export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000, options = {}) {
     return new Promise((resolve, reject) => {
         let raw = {};
         const requestedAt = Date.now();
@@ -69,7 +69,7 @@ export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
                 return;
             try {
                 const identity = observedIdentity(raw, serial);
-                if (!identity.model)
+                if (!identity.model || (options.requireObservedSerial && !identity.observedSerial))
                     return;
                 complete = true;
                 cleanup();

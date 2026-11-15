@@ -10,6 +10,8 @@ Optional signed MQTT control supports explicitly selected local and cloud routes
 
 Agent guidance is available from initialization instructions, `get_agent_guide` and `bambu://workflow/` resources. `get_agent_readiness` reports only known local configuration and capabilities; unknown remains unknown. The existing `counterpart/1` setup schema is unchanged.
 
+`get_printer_status({fresh:true})` provides read-only fresh MQTT identity/state/error telemetry through the same shared backend and requires a matching returned serial. Default display status is unchanged. This identity probe does not qualify full print readiness.
+
 ## Invariants
 
 - Preserve exact-file and selected-plate inspection, fresh observed identity, nozzle, state and safety checks on print paths. File-only inspection and local configuration do not authorize dispatch.

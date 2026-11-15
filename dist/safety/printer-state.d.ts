@@ -1,8 +1,12 @@
 import { BambuClient } from "bambu-node";
 export declare const MODEL_IDS: Record<string, string>;
 export declare const SERIAL_MODELS: Record<string, string>;
+export interface FreshPrinterStatusOptions {
+    /** Identity probes require a printer-returned serial as well as an observed model. */
+    requireObservedSerial?: boolean;
+}
 /** Only raw reports received after this request are evidence. Never read printer.data here. */
-export declare function readFreshPrinterStatus(printer: BambuClient, serial: string, timeoutMs?: number): Promise<any>;
+export declare function readFreshPrinterStatus(printer: BambuClient, serial: string, timeoutMs?: number, options?: FreshPrinterStatusOptions): Promise<any>;
 export interface PrinterStateRequirements {
     model: string;
     nozzleDiameters: number[];

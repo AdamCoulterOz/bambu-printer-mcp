@@ -1,5 +1,6 @@
 import { FlightRecords, type PrintGeometry } from "../counterpart/flight-record.js";
 import { CameraStreams, type FrameOptions } from "./camera-stream.js";
+import { type FreshPrinterStatusOptions } from "../safety/printer-state.js";
 import { inspectPrintFile, type PrintFileInspection } from "../safety/print-file.js";
 import { type PrinterStateRequirements } from "../safety/printer-state.js";
 /**
@@ -125,7 +126,7 @@ export declare class BambuImplementation {
     private validateLoadedGcodeState;
     private resolveProjectFileMetadata;
     /** Safety reads never use the display cache or configured-serial model inference. */
-    getSafetyStatus(host: string, serial: string, token: string): Promise<any>;
+    getSafetyStatus(host: string, serial: string, token: string, options?: FreshPrinterStatusOptions): Promise<any>;
     /**
      * The merged MQTT report for counterpart_print_progress and when it arrived.
      * On a held session it comes from the cache with no printer traffic. PushAll

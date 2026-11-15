@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add `get_printer_status({fresh:true})` for read-only fresh MQTT identity, state and error telemetry with a matching printer-returned serial and observation timestamps. Preserve default display status and existing internal print preflight behavior; this read does not authorize dispatch.
+
 - Share one printer backend among independent stateful HTTP MCP sessions and add a private-token stdio-to-HTTP client relay. Session closure leaves the backend running; `MCP_HTTP_STATEFUL=false` now fails startup.
 - Add opt-in signed local and cloud MQTT controls with operator-provided signing material, independent device trust and an explicitly initialized persistent counter. Fail closed when signing prerequisites are missing; keep native file transfer separate and do not automatically replay uncertain dispatches.
 - Add optional Bambu account login through a temporary loopback browser, local session status and logout, and live bound-printer listing. Account authentication can supply signed cloud credentials; tokens are not returned by the tools.

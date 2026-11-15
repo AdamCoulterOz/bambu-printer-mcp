@@ -11,7 +11,7 @@ import {cameraNumber} from "./camera-tools.js";
 import {cameraFrameParser, cameraAuth} from "./camera-wire.js";
 import { createHash } from "node:crypto";
 import { controlReply, refusedControlMessage, type ControlReply } from "../control-reply.js";
-import { isFinishedIdleJob, isCancelledX2DJob, readFreshPrinterStatus } from "../safety/printer-state.js";
+import { isFinishedIdleJob, isCancelledX2DJob, readFreshPrinterStatus, type FreshPrinterStatusOptions } from "../safety/printer-state.js";
 import fs from "node:fs/promises";
 import { createReadStream, readFileSync, existsSync, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
@@ -997,8 +997,8 @@ export class BambuImplementation {
   }
 
   /** Safety reads never use the display cache or configured-serial model inference. */
-  async getSafetyStatus(host: string, serial: string, token: string): Promise<any> {
-    return readFreshPrinterStatus(await this.getPrinter(host, serial, token), serial);
+  async getSafetyStatus(host: string, serial: string, token: string, options: FreshPrinterStatusOptions = {}): Promise<any> {
+    return readFreshPrinterStatus(await this.getPrinter(host, serial, token), serial, undefined, options);
   }
 
   /**

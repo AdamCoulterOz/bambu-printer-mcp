@@ -13,3 +13,7 @@ Implemented optional local and cloud signed MQTT controls with independent appli
 ## 2026-11-15 — Shared stateful HTTP backend
 
 Changed Streamable HTTP to give each client a separate stateful MCP protocol session over one process-owned printer backend. Session deletion no longer tears down shared backend resources; request-bound elicitation and cancellation remain isolated. The earlier stateless option is explicitly unsupported. Added a private-token stdio-to-HTTP relay for clients that cannot connect directly. Local protocol and mocked validation do not establish live printer behavior.
+
+## 2026-11-15 — Exposed an explicit fresh identity read
+
+Added optional `fresh: true` to `get_printer_status` using the existing shared backend and fresh MQTT collector. This mode waits for a matching printer-returned serial even when a model-only status arrives first. Existing display behavior and default internal print safety reads remain unchanged. The read does not authorize printing or establish complete print readiness; synthetic tests do not prove live identity or signed-control acceptance.

@@ -853,8 +853,8 @@ export class BambuImplementation {
         };
     }
     /** Safety reads never use the display cache or configured-serial model inference. */
-    async getSafetyStatus(host, serial, token) {
-        return readFreshPrinterStatus(await this.getPrinter(host, serial, token), serial);
+    async getSafetyStatus(host, serial, token, options = {}) {
+        return readFreshPrinterStatus(await this.getPrinter(host, serial, token), serial, undefined, options);
     }
     /**
      * The merged MQTT report for counterpart_print_progress and when it arrived.

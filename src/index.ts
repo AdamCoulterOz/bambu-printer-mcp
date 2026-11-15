@@ -2574,10 +2574,14 @@ export class BambuPrinterMCPServer {
           { name: "account_logout", description: "Cancel login and remove the private local cached account session; does not revoke a remote session.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
           {
             name: "get_printer_status",
-            description: "Get the current status of the Bambu Lab printer",
+            description: "Get Bambu printer display status, or use fresh:true for new MQTT state and error reports with a verified returned serial, observed model and observation timestamps. Fresh identity telemetry alone does not authorize printing or prove full print readiness.",
             inputSchema: {
               type: "object",
               properties: {
+                fresh: {
+                  type: "boolean",
+                  description: "Require new MQTT telemetry with matching printer-returned serial and observed model; never use cached or configured identity. Default false preserves display status."
+                },
                 host: {
                   type: "string",
                   description: "Hostname or IP address of the printer (default: value from env)"
@@ -4016,7 +4020,10 @@ export class BambuPrinterMCPServer {
             });
             break;
           case "get_printer_status":
-            result = await this.bambu.getStatus(host, bambuSerial, bambuToken);
+            if (args?.fresh !== undefined && typeof args.fresh !== "boolean") throw new Error("fresh must be a boolean.");
+            result = args?.fresh === true
+              ? await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken, { requireObservedSerial: true })
+              : await this.bambu.getStatus(host, bambuSerial, bambuToken);
             break;
 
           case "get_printer_filaments": {
