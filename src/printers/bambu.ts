@@ -264,7 +264,14 @@ function getPrinterKey(host: string, serial: string, token: string): string {
   return `${host}-${serial}-${token}`;
 }
 
+const MQTT_CONNECT_DEADLINE_MS = 10_000;
+const MQTT_DISCONNECT_DEADLINE_MS = 5_000;
+const SAFETY_STATUS_DEADLINE_MS = 15_000;
+
 class TolerantBambuClient extends BambuClient {
+  private retired = false;
+  private cancelInitialConnect?: (error: Error) => void;
+  private disconnecting?: Promise<void>;
   /**
    * H2D-class firmware streams push status immediately after subscribe, but
    * never answers bambu-node's initial get_version round-trip. Avoid treating
@@ -305,57 +312,62 @@ class TolerantBambuClient extends BambuClient {
    * plus `cert`/`key` when creds are available.
    */
   override async connect(): Promise<[void]> {
+    if (this.retired) throw new Error("Printer MQTT connection was retired before connecting.");
     await new Promise<void>((resolve, reject) => {
       const self: any = this;
-      if (self.mqttClient) {
-        throw new Error("Can't establish a new connection while running another one!");
-      }
-      const tlsOpts: Record<string, unknown> = {
-        username: "bblp",
-        password: self.config.accessToken,
-        reconnectPeriod: self.clientOptions.reconnectInterval,
-        connectTimeout: self.clientOptions.connectTimeout,
-        keepalive: self.clientOptions.keepAlive,
-        resubscribe: true,
-        rejectUnauthorized: false,
+      if (self.mqttClient) throw new Error("Can't establish a new connection while running another one!");
+      let pending = true;
+      const rejectInitial = (error: Error) => {
+        if (!pending) return;
+        pending = false;
+        clearTimeout(deadline);
+        this.cancelInitialConnect = undefined;
+        reject(error);
       };
-      if (CLIENT_CREDS) {
-        tlsOpts.cert = CLIENT_CREDS.cert;
-        tlsOpts.key = CLIENT_CREDS.key;
-      }
-      const client = mqtt.connect(
-        `mqtts://${self.config.host}:${self.config.port}`,
-        tlsOpts as any
-      );
+      this.cancelInitialConnect = rejectInitial;
+      const retire = (error: Error, failed = false) => {
+        if (this.retired) return;
+        this.retired = true;
+        rejectInitial(error);
+        if (failed) self.emit("client:error", error);
+        else self.emit("client:disconnect", true);
+        self.emit("printer:statusUpdate", self._printerStatus, "OFFLINE");
+        self._printerStatus = "OFFLINE";
+        if (self.currentJob) self.emit("job:pause", self.currentJob, true);
+        // MQTT finishes scheduling reconnect during its event callback. End it
+        // afterwards so no orphan reconnect timer survives retirement.
+        queueMicrotask(() => { void this.disconnect(true).catch(() => {}); });
+      };
+      const deadline = setTimeout(() => retire(new Error("Printer MQTT connection timed out after 10 seconds.")), MQTT_CONNECT_DEADLINE_MS);
+      const tlsOpts: Record<string, unknown> = {
+        username: "bblp", password: self.config.accessToken,
+        reconnectPeriod: self.config.reconnectInterval,
+        connectTimeout: self.config.connectTimeout,
+        keepalive: self.config.keepAlive,
+        resubscribe: true, rejectUnauthorized: false,
+      };
+      if (CLIENT_CREDS) { tlsOpts.cert = CLIENT_CREDS.cert; tlsOpts.key = CLIENT_CREDS.key; }
+      let client: ReturnType<typeof mqtt.connect>;
+      try { client = mqtt.connect(`mqtts://${self.config.host}:${self.config.port}`, tlsOpts as any); }
+      catch (error) { retire(error instanceof Error ? error : new Error("Printer MQTT connection failed."), true); return; }
       self.mqttClient = client;
       client.on("connect", async (...args: any[]) => {
+        if (this.retired) return;
         try {
           await self.onConnect(...args);
+          if (this.retired || !pending) return;
+          pending = false;
+          clearTimeout(deadline);
+          this.cancelInitialConnect = undefined;
           self.emit("client:connect");
           resolve();
-        } catch (e) {
-          reject(e);
-        }
+        } catch (error) { retire(error instanceof Error ? error : new Error("Printer MQTT subscription failed."), true); }
       });
-      client.on("disconnect", () => {
-        self.emit("client:disconnect", false);
-        self.emit("printer:statusUpdate", self._printerStatus, "OFFLINE");
-        self._printerStatus = "OFFLINE";
-        if (self.currentJob) self.emit("job:pause", self.currentJob, true);
-      });
-      client.on("offline", () => {
-        self.emit("client:disconnect", true);
-        self.emit("printer:statusUpdate", self._printerStatus, "OFFLINE");
-        self._printerStatus = "OFFLINE";
-        if (self.currentJob) self.emit("job:pause", self.currentJob, true);
-      });
-      client.on("message", (topic: string, payload: Buffer) =>
-        self.emit("rawMessage", topic, payload)
-      );
-      client.on("error", (err: Error) => {
-        self.emit("client:error", err);
-        reject(err);
-      });
+      client.on("disconnect", () => retire(new Error("Printer MQTT disconnected.")));
+      client.on("offline", () => retire(new Error("Printer MQTT went offline.")));
+      client.on("close", () => retire(new Error("Printer MQTT connection closed.")));
+      client.on("message", (topic: string, payload: Buffer) => { if (!this.retired) self.emit("rawMessage", topic, payload); });
+      client.on("error", (error: Error) => retire(error, true));
     });
     // H2-series printers don't respond to get_version with module info.
     // Infer model from serial number prefix so downstream code works.
@@ -367,6 +379,33 @@ class TolerantBambuClient extends BambuClient {
       }
     }
     return [undefined as unknown as void];
+  }
+
+  override disconnect(force = false, options?: Parameters<BambuClient["disconnect"]>[1]): Promise<void> {
+    const self: any = this;
+    this.retired = true;
+    this.cancelInitialConnect?.(new Error("Printer MQTT connection cancelled by disconnect."));
+    const client = self.mqttClient;
+    const forceClose = () => {
+      if (!client) return;
+      try { client.end(true); } catch { /* The socket is forcibly closed below. */ }
+      try { client.stream?.destroy(); } catch { /* Already closed. */ }
+    };
+    if (this.disconnecting) { if (force) forceClose(); return this.disconnecting; }
+    this.disconnecting = Promise.resolve().then(() => new Promise<void>(resolve => {
+      if (!client) { resolve(); return; }
+      let closed = false;
+      const finish = () => {
+        if (closed) return;
+        closed = true; clearTimeout(deadline);
+        if (self.mqttClient === client) self.mqttClient = undefined;
+        resolve();
+      };
+      const deadline = setTimeout(() => { forceClose(); finish(); }, MQTT_DISCONNECT_DEADLINE_MS);
+      try { client.end(force, options, finish); }
+      catch { forceClose(); finish(); }
+    }));
+    return this.disconnecting;
   }
 }
 
@@ -393,6 +432,8 @@ class BambuClientStore {
   /** Sees every merged report, so a resume record notices a job ending even when nobody polls. */
   constructor(private readonly onReport?: (host: string, serial: string, report: Record<string, any>) => void) {}
 
+  private clients = new Map<string, BambuClient>();
+  private draining?: Promise<void>;
   private printers: Map<string, BambuClient> = new Map();
   private initialConnectionPromises: Map<string, Promise<void>> = new Map();
   private reportSnapshots: Map<string, Record<string, any>> = new Map();
@@ -437,8 +478,9 @@ class BambuClientStore {
   }
 
   /** Merges the printer's reports into its snapshot as they arrive (tests feed a client without a connection). */
-  private watchReports(printer: BambuClient, host: string, serial: string, key: string): void {
+  private watchReports(printer: BambuClient, host: string, serial: string, key: string, current: () => boolean = () => true): void {
     printer.on("rawMessage", (_topic, payload) => {
+      if (!current()) return;
       try {
         const parsed = JSON.parse(payload.toString());
         const printMessage = parsed?.print;
@@ -454,6 +496,7 @@ class BambuClientStore {
     // bambu-node passes its whole merged report and then what changed. Only the change is merged here, so a field the
     // printer has not sent again (the previous job's layer) is not copied back over this merge's own reset.
     printer.on("printer:dataUpdate", (_data, changed) => {
+      if (!current()) return;
       if (!changed || typeof changed !== "object") return;
       this.updateReportSnapshot(key, changed);
       this.reportObserved(host, serial, key);
@@ -466,7 +509,13 @@ class BambuClientStore {
     try { this.onReport(host, serial, report); } catch { /* an observer never breaks report handling */ }
   }
 
-  private clearPrinterState(key: string): void {
+  private isCurrent(key: string, printer: BambuClient): boolean {
+    return (this.clients.get(key) ?? this.printers.get(key)) === printer;
+  }
+
+  private clearPrinterState(key: string, printer?: BambuClient): void {
+    if (printer && !this.isCurrent(key, printer)) return;
+    this.clients.delete(key);
     this.printers.delete(key);
     this.initialConnectionPromises.delete(key);
     this.reportSnapshots.delete(key);
@@ -536,83 +585,78 @@ class BambuClientStore {
   }
 
   async getPrinter(host: string, serial: string, token: string): Promise<BambuClient> {
+    // Native plug-in handoff drains the same store; do not race it with a new socket.
+    if (this.draining) await this.draining;
     const key = getPrinterKey(host, serial, token);
-
-    if (this.printers.has(key)) {
-      return this.printers.get(key)!;
+    if (this.printers.has(key)) return this.printers.get(key)!;
+    const existing = this.initialConnectionPromises.get(key);
+    if (existing) {
+      await existing;
+      const connected = this.printers.get(key);
+      if (connected) return connected;
+      throw new Error("Printer MQTT connection was retired before becoming available.");
     }
-
-    if (this.initialConnectionPromises.has(key)) {
-      await this.initialConnectionPromises.get(key);
-      if (this.printers.has(key)) {
-        return this.printers.get(key)!;
-      }
-      throw new Error(`Existing Bambu client connection for ${key} failed.`);
-    }
-
-    const printer = new TolerantBambuClient({
-      host,
-      serialNumber: serial,
-      accessToken: token,
-    });
+    const printer = new TolerantBambuClient({host, serialNumber: serial, accessToken: token});
+    this.clients.set(key, printer);
     this.ensureInitialReportPromise(key);
-
-    this.watchReports(printer, host, serial, key);
-
-    printer.on("client:connect", () => {
+    const current = () => this.isCurrent(key, printer);
+    this.watchReports(printer, host, serial, key, current);
+    const failed = () => {
+      if (!current()) return;
+      this.clearPrinterState(key, printer);
+      queueMicrotask(() => { void printer.disconnect(true).catch(() => {}); });
+    };
+    printer.on("client:error", failed);
+    printer.on("client:disconnect", failed);
+    // Publish the shared promise before connect can emit synchronous callbacks.
+    const connectPromise = Promise.resolve().then(async () => {
+      if (!current()) throw new Error("Printer MQTT connection cancelled before connecting.");
+      await printer.connect();
+      if (!current()) throw new Error("Printer MQTT connection was retired before becoming available.");
       this.printers.set(key, printer);
       this.initialConnectionPromises.delete(key);
     });
-
-    printer.on("client:error", () => {
-      this.clearPrinterState(key);
-    });
-
-    printer.on("client:disconnect", () => {
-      this.clearPrinterState(key);
-    });
-
-    const connectPromise = printer.connect().then(() => {});
     this.initialConnectionPromises.set(key, connectPromise);
-
-    try {
-      await connectPromise;
-      return printer;
-    } catch (error) {
-      this.clearPrinterState(key);
+    try { await connectPromise; return printer; }
+    catch (error) {
+      this.clearPrinterState(key, printer);
+      void printer.disconnect(true).catch(() => {});
       throw error;
     }
   }
 
   forgetPrinter(printer: BambuClient): void {
-    for (const [key, cached] of this.printers) {
-      if (cached === printer) this.clearPrinterState(key);
+    for (const [key, owned] of new Map([...this.printers, ...this.clients])) {
+      if (owned === printer) this.clearPrinterState(key, printer);
     }
   }
 
-  async disconnectAll(): Promise<void> {
-    const disconnectPromises: Promise<void>[] = [];
-
-    for (const printer of this.printers.values()) {
-      disconnectPromises.push(
-        (async () => {
-          try {
-            await printer.disconnect();
-          } catch (error) {
-            console.error("Failed to disconnect Bambu client", error);
-          }
-        })()
-      );
-    }
-
-    await Promise.allSettled(disconnectPromises);
-    this.printers.clear();
-    this.initialConnectionPromises.clear();
-    this.reportSnapshots.clear();
-    this.reportTimes.clear();
-    this.refreshTimes.clear();
-    this.initialReportPromises.clear();
-    this.initialReportResolvers.clear();
+  disconnectAll(): Promise<void> {
+    if (this.draining) return this.draining;
+    const owned = new Set([...this.clients.values(), ...this.printers.values()]);
+    // Revoke ownership before asynchronous disconnect events or reports arrive.
+    this.clients.clear(); this.printers.clear(); this.initialConnectionPromises.clear();
+    this.reportSnapshots.clear(); this.reportTimes.clear(); this.refreshTimes.clear();
+    this.initialReportPromises.clear(); this.initialReportResolvers.clear();
+    const draining = Promise.resolve().then(async () => {
+      await Promise.all([...owned].map(async printer => {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            printer.disconnect(),
+            new Promise<void>(resolve => { deadline = setTimeout(() => {
+              void printer.disconnect(true).catch(() => {});
+              try { (printer as any).mqttClient?.stream?.destroy(); } catch { /* Already closed. */ }
+              resolve();
+            }, MQTT_DISCONNECT_DEADLINE_MS); }),
+          ]);
+        } catch (error) { console.error("Failed to disconnect Bambu client", error); }
+        finally { if (deadline) clearTimeout(deadline); }
+      }));
+    });
+    this.draining = draining;
+    void draining.finally(() => { if (this.draining === draining) this.draining = undefined; });
+    return draining;
   }
 }
 
@@ -998,7 +1042,19 @@ export class BambuImplementation {
 
   /** Safety reads never use the display cache or configured-serial model inference. */
   async getSafetyStatus(host: string, serial: string, token: string, options: FreshPrinterStatusOptions = {}): Promise<any> {
-    return readFreshPrinterStatus(await this.getPrinter(host, serial, token), serial, undefined, options);
+    const expires = performance.now() + SAFETY_STATUS_DEADLINE_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let printer: BambuClient;
+    try {
+      printer = await Promise.race([
+        this.getPrinter(host, serial, token),
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("Fresh printer safety read timed out while connecting to MQTT.")), SAFETY_STATUS_DEADLINE_MS); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+    assertOperationActive();
+    const remaining = expires - performance.now();
+    if (remaining <= 0) throw new Error("Fresh printer safety read deadline expired before identity verification.");
+    return readFreshPrinterStatus(printer, serial, Math.min(5000, remaining), options);
   }
 
   /**

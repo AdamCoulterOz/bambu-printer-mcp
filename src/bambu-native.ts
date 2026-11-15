@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PrinterRefusal, REFUSAL_CODES, type RefusalCode } from "./refusal.js";
 
 export type BambuNativePrintOptions = {
   host: string;
@@ -50,7 +51,26 @@ type NativeHelperResult = {
   authorizedAttempts: number;
   updates: string[];
   stderr: string;
+  diagnostics: NativeDiagnostics;
+  latestReceiptCodes: number[];
+  receiptOverflow: boolean;
 };
+
+/** Only bounded stage names, elapsed times and numeric status codes cross the MCP boundary. */
+export type NativeDiagnostics = {
+  phase: string;
+  elapsedMs: number;
+  authorizationRequests: number;
+  authorizedAttempts: number;
+  safetyReason?: "connection-timeout" | "identity" | "state" | "other";
+  events: Array<{ stage: string; elapsedMs: number; status?: number; code?: number }>;
+};
+export class NativeOperationError extends Error {
+  constructor(message: string, readonly diagnostics: NativeDiagnostics, readonly refusalCode?: RefusalCode) {
+    super(message);
+    this.name = "NativeOperationError";
+  }
+}
 
 export type BambuNativeUpdateCallback = (line: string) => void;
 
@@ -60,6 +80,10 @@ export type BambuNativeExecution = {
   assertActive?: () => void;
   /** Read and validate fresh printer state immediately before each guarded dispatch. */
   beforeDispatch?: () => Promise<void>;
+  /** Synchronous authorization-boundary bookkeeping, immediately before the helper pipe write. */
+  onDispatchAuthorized?: () => void;
+  /** Internal bounded helper budget; not exposed as an MCP argument. */
+  timeoutMs?: number;
 };
 
 export type BambuNativeFanCommand = {
@@ -352,6 +376,19 @@ export async function interruptNativeOperations(serial: string): Promise<void> {
   await Promise.all(pending.map(helper => helper.closed));
 }
 
+/** Keep only protocol stages and bounded progress in printable updates; never echo plug-in text. */
+function safeNativePrintUpdate(line: string): string | undefined {
+  let match = /^native_update status=(-?\d{1,6}) code=(-?\d{1,6}) msg=(.*)$/.exec(line);
+  if (match) return `native_update status=${match[1]} code=${match[2]} msg=${/^\d{1,3}%$/.test(match[3]) ? match[3] : "progress"}`;
+  match = /^native_print result=(-?\d{1,6})$/.exec(line);
+  if (match) return `native_print result=${match[1]}`;
+  match = /^(native_update_cert result|native_connect status)=(-?\d{1,6})(?:\s.*)?$/.exec(line);
+  if (match) return `${match[1]}=${match[2]}`;
+  if (/^native_install_device_cert(?:\s|$)/.test(line)) return "native_install_device_cert";
+  if (/^native_retry reason=cert_bootstrap(?:\s|$)/.test(line)) return "native_retry reason=cert_bootstrap";
+  return undefined;
+}
+
 function runNativeHelper(
   mode: "--probe" | "--print-authorized" | "--upload" | "--command" | "--command-authorized",
   env: NodeJS.ProcessEnv,
@@ -366,6 +403,8 @@ function runNativeHelper(
     throw new Error("Native dispatch requires a beforeDispatch fresh-state check.");
   }
   const install = resolveNativeInstall();
+  const startedAt = performance.now();
+  const deadline = startedAt + timeoutMs;
   return new Promise((resolve, reject) => {
     const child = spawn(install.helper, [mode], {
       env: { ...env, ...install.env },
@@ -378,14 +417,35 @@ function runNativeHelper(
     let stderr = "";
     let settled = false;
     let failure: Error | undefined;
+    let refusalCode: RefusalCode | undefined;
     let dispatchAttempt = 0;
     let authorizedAttempts = 0;
+    let latestReceiptCodes: number[] = [];
+    let receiptOverflow = false;
+    const trackReceipt = (line: string) => {
+      const match = /^native_print result=(-?\d{1,6})$/.exec(line);
+      if (!match || authorizedAttempts === 0) return;
+      if (latestReceiptCodes.length >= 32) { receiptOverflow = true; return; }
+      latestReceiptCodes.push(Number(match[1]));
+    };
     let authorizing = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let phase = "helper_started";
+    let safetyReason: NativeDiagnostics["safetyReason"];
+    const events: NativeDiagnostics["events"] = [];
+    const record = (stage: string, details: { status?: number; code?: number } = {}) => {
+      phase = stage;
+      events.push({ stage, elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)), ...details });
+      if (events.length > 24) events.shift();
+    };
+    const diagnostics = (): NativeDiagnostics => ({ phase, elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)), authorizationRequests: dispatchAttempt, authorizedAttempts, ...(safetyReason ? { safetyReason } : {}), events: [...events] });
+    record("helper_started");
+    const closePipesAfterExit = () => { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); };
     const stop = (error: Error) => {
       if (settled || failure) return;
       failure = error;
-      child.kill("SIGTERM");
+      if (child.exitCode !== null || child.signalCode !== null) closePipesAfterExit();
+      else child.kill("SIGTERM");
       // Do not release the checked snapshot or operation lock until the process
       // has actually exited, even if the plug-in ignores SIGTERM.
       killTimer = setTimeout(() => { child.kill("SIGKILL"); }, 1000);
@@ -394,10 +454,11 @@ function runNativeHelper(
       `${reason} The native command may already have reached the printer; verify its state before retrying.`
     );
     const onAbort = () => stop(interrupted("Native request cancelled."));
-    const timer = setTimeout(() => stop(interrupted(`Bambu native helper timed out after ${timeoutMs} ms.`)), timeoutMs);
+    const timeout = () => stop(interrupted(`Bambu native helper timed out after ${timeoutMs} ms.`));
+    const timer = setTimeout(timeout, timeoutMs);
     const guard = execution.assertActive ? setInterval(() => {
       try { execution.assertActive!(); }
-      catch (error) { stop(interrupted(error instanceof Error ? error.message : String(error))); }
+      catch (error) { stop(interrupted(mode === "--print-authorized" ? "Native operation safety generation was invalidated." : error instanceof Error ? error.message : String(error))); }
     }, 25) : undefined;
     const cleanup = () => {
       activeHelpers.delete(child);
@@ -426,24 +487,52 @@ function runNativeHelper(
       }
       dispatchAttempt = attempt;
       authorizing = true;
+      record("authorization_pending");
       try {
         await execution.beforeDispatch!();
         if (failure || settled) return;
+        if (performance.now() >= deadline) { timeout(); return; }
         execution.signal?.throwIfAborted();
         execution.assertActive?.();
+        // Bookkeeping and the write are synchronous after the final safety check.
+        if (performance.now() >= deadline) { timeout(); return; }
+        execution.onDispatchAuthorized?.();
+        if (failure || settled) return;
+        execution.signal?.throwIfAborted();
+        execution.assertActive?.();
+        if (performance.now() >= deadline) { timeout(); return; }
         child.stdin.write(`native_dispatch_authorized=${attempt}\n`);
         authorizedAttempts++;
+        latestReceiptCodes = [];
+        receiptOverflow = false;
+        record("authorization_granted");
       } catch (error) {
-        stop(error instanceof Error ? error : new Error(String(error)));
+        if (mode === "--print-authorized") {
+          const reason = error instanceof Error ? error.message : "";
+          safetyReason = /timed?\s*out|timeout|deadline/i.test(reason) ? "connection-timeout"
+            : /identity|serial|model/i.test(reason) ? "identity"
+              : /state|running|busy|idle|nozzle|material|error|job/i.test(reason) ? "state" : "other";
+          record("safety_check_failed");
+          if (error instanceof PrinterRefusal && REFUSAL_CODES.includes(error.code)) refusalCode = error.code;
+          const reasonText = refusalCode === "printer-not-ready" ? "Printer is not safely idle."
+            : refusalCode === "printer-command-rejected" ? "The printer rejected the print command."
+              : refusalCode === "printer-upload-failed" ? "The print file did not reach the printer."
+                : refusalCode === "slicer-waiting-on-dialog" ? "The slicer stopped while waiting for a dialog."
+                  : /^Printer job changed during preflight\./.test(reason) ? "Printer job changed during preflight."
+                    : /^The printer's SD card or USB stick is no longer ready\./.test(reason) ? "The printer's SD card or USB stick is no longer ready."
+                      : `Fresh printer safety check failed (${safetyReason}).`;
+          stop(new Error(`${reasonText} Check printer status before retrying.`));
+        } else stop(error instanceof Error ? error : new Error(String(error)));
       } finally {
         authorizing = false;
       }
     };
-    child.stdin.on("error", (error) => stop(error));
+    child.stdin.on("error", (error) => stop(mode === "--print-authorized" ? new Error("Native helper communication failed; check printer status before retrying.") : error));
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
       const lines = stdout.split(/\r?\n/);
       stdout = lines.pop() || "";
+      if (mode === "--print-authorized" && stdout.length > 16384) stdout = stdout.slice(-16384);
       for (const line of lines) {
         const trimmed = line.trim();
         if (trimmed) {
@@ -451,8 +540,21 @@ function runNativeHelper(
             void authorizeDispatch(trimmed);
             continue;
           }
-          updates.push(trimmed);
-          onUpdate?.(trimmed);
+          // Keep raw helper output out of diagnostics. Only known stages and bounded integers are retained.
+          let match = /^native_update status=(-?\d{1,6}) code=(-?\d{1,6})(?:\s|$)/.exec(trimmed);
+          if (match) record("progress", { status: Number(match[1]), code: Number(match[2]) });
+          else if ((match = /^native_connect status=(-?\d{1,6})(?:\s|$)/.exec(trimmed))) record("printer_connection", { status: Number(match[1]) });
+          else if ((match = /^native_update_cert result=(-?\d{1,6})(?:\s|$)/.exec(trimmed))) record("certificate_update", { code: Number(match[1]) });
+          else if (/^native_install_device_cert(?:\s|$)/.test(trimmed)) record("device_certificate");
+          else if (/^native_retry reason=cert_bootstrap(?:\s|$)/.test(trimmed)) record("certificate_retry");
+          else if ((match = /^native_print result=(-?\d{1,6})$/.exec(trimmed))) record("print_result", { code: Number(match[1]) });
+          if (mode === "--print-authorized") trackReceipt(trimmed);
+          const visible = mode === "--print-authorized" ? safeNativePrintUpdate(trimmed) : trimmed;
+          if (visible !== undefined) {
+            updates.push(visible);
+            if (mode === "--print-authorized" && updates.length > 128) updates.shift();
+            onUpdate?.(visible);
+          }
         }
       }
     });
@@ -461,23 +563,34 @@ function runNativeHelper(
     });
     child.on("error", (error) => {
       // Node emits close after a spawn failure too. Keep one exit/cleanup path.
-      failure ??= error;
+      failure ??= mode === "--print-authorized" ? new Error("Native helper could not be started.") : error;
+    });
+    child.on("exit", () => {
+      // A helper descendant may retain inherited pipe handles after the helper exits.
+      // Once a failed helper is reaped, do not let those handles extend its deadline.
+      if (failure) closePipesAfterExit();
     });
     child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       cleanup();
-      if (failure) { reject(failure); return; }
+      if (failure) {
+        reject(mode === "--print-authorized" ? new NativeOperationError(failure.message, diagnostics(), refusalCode) : failure);
+        return;
+      }
       if (needsAuthorization && (code === 0 || updates.includes("native_print result=0") || stdout.trim() === "native_print result=0") && (authorizing || authorizedAttempts === 0)) {
-        reject(new Error("Native helper exited without completed dispatch authorization."));
+        const message = "Native helper exited without completed dispatch authorization.";
+        reject(mode === "--print-authorized" ? new NativeOperationError(message, diagnostics()) : new Error(message));
         return;
       }
       const trailing = stdout.trim();
-      if (trailing) {
-        updates.push(trailing);
-        onUpdate?.(trailing);
+      if (mode === "--print-authorized") trackReceipt(trailing);
+      const visible = mode === "--print-authorized" ? safeNativePrintUpdate(trailing) : trailing;
+      if (visible) {
+        updates.push(visible);
+        onUpdate?.(visible);
       }
-      resolve({ resultCode: code ?? (signal ? 1 : 0), signal, authorizedAttempts, updates, stderr });
+      resolve({ resultCode: code ?? (signal ? 1 : 0), signal, authorizedAttempts, updates, stderr, diagnostics: diagnostics(), latestReceiptCodes, receiptOverflow });
     });
   });
 }
@@ -835,6 +948,14 @@ export async function probeBambuNative(host: string, token: string): Promise<Rec
   return { status: "ok", route: "bambu:///local", updates: result.updates };
 }
 
+// Leave time for helper termination and an MCP response before a typical 300 s client deadline.
+// An internal override supports bounded fixture tests, never increasing the production ceiling.
+function nativePrintBudget(override?: number): number {
+  if (override === undefined) return 230_000;
+  if (!Number.isInteger(override) || override < 1 || override > 230_000) throw new Error("Invalid native print timeout.");
+  return override;
+}
+
 export async function printWithBambuNative(
   options: BambuNativePrintOptions,
   onUpdate: BambuNativeUpdateCallback | undefined,
@@ -878,22 +999,23 @@ export async function printWithBambuNative(
       BAMBU_NATIVE_TIMELAPSE: boolEnv(options.timelapse, false),
       ...(options.externalStorage === undefined ? {} : { BAMBU_NATIVE_TRY_EMMC_PRINT: String(!options.externalStorage) }),
     },
-    300_000,
+    nativePrintBudget(execution.timeoutMs),
     onUpdate,
     execution
   );
   if (result.resultCode !== 0) {
-    const explicitRejection = result.updates.some(line => /^native_print result=-?[1-9]\d*$/.test(line));
-    if (result.authorizedAttempts > 0 && (result.updates.includes("native_print result=0") || (result.signal && !explicitRejection))) {
-      throw new Error("Bambu native print dispatch is uncertain: the printer may have accepted this job before the helper exited. Check printer status and the job name before retrying; do not automatically resend it.");
+    const explicitRejection = !result.receiptOverflow && result.latestReceiptCodes.length > 0 && result.latestReceiptCodes.every(code => code < 0);
+    if (result.authorizedAttempts > 0 && !explicitRejection) {
+      throw new NativeOperationError("Bambu native print dispatch is uncertain: the printer may have accepted this job before the helper exited. Check printer status and the job name before retrying; do not automatically resend it.", result.diagnostics);
     }
-    const detail = [
-      ...result.updates,
-      ...(result.stderr ? [result.stderr.trim()] : []),
-    ]
-      .filter((line) => line.startsWith("native_error=") || line.startsWith("native_print result=") || line.startsWith("local MQTT connection"))
-      .join("; ");
-    throw new Error(`Bambu native local print failed (${result.resultCode})${detail ? `: ${detail}` : "."}`);
+    throw new NativeOperationError(`Bambu native local print failed (${result.resultCode}). Check printer status and the job before retrying; do not automatically resend.`, result.diagnostics);
+  }
+  const receipts = result.latestReceiptCodes;
+  // A successful exit alone is not a dispatch receipt. A retry may emit a
+  // negative result before the final success, but duplicate/conflicting success
+  // receipts do not establish which dispatch the helper completed.
+  if (result.receiptOverflow || !receipts.length || receipts[receipts.length - 1] !== 0 || receipts.filter(code => code === 0).length !== 1 || receipts.slice(0, -1).some(code => code >= 0)) {
+    throw new NativeOperationError("Bambu native print dispatch is uncertain: the helper exited without one unambiguous successful print receipt. Check printer status and the job before retrying; do not automatically resend it.", result.diagnostics);
   }
   return {
     status: "success",

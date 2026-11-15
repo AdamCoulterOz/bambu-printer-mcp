@@ -912,6 +912,8 @@ test('native helper failure after authorized print retains the exact unconfirmed
   const peer=await server(t,{crashAfterDispatch:true});
   const sent=await peer.print({connection_mode:'bambu_native',ams_slots:[0]});
   assert.equal(sent.isError,true);assert.equal(sent.structuredContent.printOutcome,'unknown');
+  assert.ok(sent.structuredContent.native_diagnostics);
+  assert.match(sent.structuredContent.suggestion,/do not automatically resend/i);
   assert.equal((await peer.events()).filter(e=>e.kind==='dispatched').length,1);
   const saved=await peer.client.callTool({name:'counterpart_print_record',arguments:{host:'127.0.0.1',bambu_serial:'20PTEST'}});
   assert.equal(saved.structuredContent.status,'recorded');

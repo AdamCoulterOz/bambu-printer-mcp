@@ -12,6 +12,8 @@ Agent guidance is available from initialization instructions, `get_agent_guide` 
 
 `get_printer_status({fresh:true})` provides read-only fresh MQTT identity/state/error telemetry through the same shared backend and requires a matching returned serial. Default display status is unchanged. This identity probe does not qualify full print readiness.
 
+Native-print safety collection and helper execution have bounded deadlines. Expired requests cannot authorize a late dispatch, and helper errors retain allowlisted diagnostics. The native-helper deadline is not an end-to-end limit on slicing or inspection. Focused fixtures and independent review cover the repair; physical printing remains unqualified.
+
 ## Invariants
 
 - Preserve exact-file and selected-plate inspection, fresh observed identity, nozzle, state and safety checks on print paths. File-only inspection and local configuration do not authorize dispatch.
@@ -23,3 +25,5 @@ Agent guidance is available from initialization instructions, `get_agent_guide` 
 ## Validation limits
 
 HTTP, signing, account and guide tests use isolated local fixtures, synthetic credentials, mocked boundaries and MCP protocol clients. On 15 November 2026, an authorized private X2D trial through the shared HTTP service observed matching fresh identity and one signed cloud part-fan command followed by restoration: broker acknowledgements accompanied raw fan telemetry changing from 0 to 1 and later returning to 0. The requested setting was 20%; raw values are unscaled and do not establish RPM or rotation. This bounded observation does not qualify other controls, models or firmware, a live account login, native upload or printing, heating, motion, or a physical print. The user approved private deployment while retaining the required four-client audit before an upstream PR. Consult [INTERFACE.md](INTERFACE.md) and the guides for actual configuration and route limitations.
+
+The first private native-print attempt timed out at the client deadline without a helper receipt. A later fresh matching-printer report still showed an older completed job and an idle printer; it does not establish whether the attempted dispatch occurred. Its outcome remains unknown and does not qualify native printing or physical success.

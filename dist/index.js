@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { STLManipulator, SLICER_TYPES, normalizeSlicerType, SlicerRunError, } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge, bridgeSnapshotRoot, describeBambuNetworkPrintError } from "./bambu-network-bridge.js";
-import { assertBambuNativeAvailable, bambuNativeControlsAvailable, bambuNativeUnavailableReason, interruptNativeOperations, validateBambuNativeMetadata, buildBambuNativeFanCommand, buildBambuNativeTemperatureCommand, printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative, } from "./bambu-native.js";
+import { NativeOperationError, assertBambuNativeAvailable, bambuNativeControlsAvailable, bambuNativeUnavailableReason, interruptNativeOperations, validateBambuNativeMetadata, buildBambuNativeFanCommand, buildBambuNativeTemperatureCommand, printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative, } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import { CadEngine } from "./cad-engine.js";
 import { CadRefusal } from "./cad/refusal.js";
@@ -1609,6 +1609,7 @@ export class BambuPrinterMCPServer {
                         if (!externalStorage)
                             assertNativeInternalStorage(printModel, dispatchStatus.raw);
                         assertActive();
+                    }, onDispatchAuthorized: () => {
                         this.bambu.recordFlightDispatch(devIp, devId, remoteFileName, requirements, resumeFile);
                         markPrintCommandSent();
                     } });
@@ -4656,12 +4657,15 @@ export class BambuPrinterMCPServer {
                 const structured = {
                     status: "error",
                     retryable: false,
-                    suggestion: refused
-                        ? `Retrying unchanged repeats this refusal. Fix the reported cause (file, arguments, printer settings, or printer state) first. Error: ${message}`
-                        : `Check parameters and try again. Error: ${message}`,
+                    suggestion: error instanceof NativeOperationError
+                        ? "Check the printer and current job before any retry. Do not automatically resend an uncertain native operation."
+                        : refused
+                            ? `Retrying unchanged repeats this refusal. Fix the reported cause (file, arguments, printer settings, or printer state) first. Error: ${message}`
+                            : `Check parameters and try again. Error: ${message}`,
                     message,
                     tool: name,
-                    ...(error instanceof PrinterRefusal ? { code: error.code } : {}), ...(["print_3mf", "upload_gcode"].includes(name) ? { printOutcome: printOutcome(error) } : {}),
+                    ...(error instanceof NativeOperationError ? { native_diagnostics: error.diagnostics } : {}),
+                    ...(error instanceof PrinterRefusal ? { code: error.code } : error instanceof NativeOperationError && error.refusalCode ? { code: error.refusalCode } : {}), ...(["print_3mf", "upload_gcode"].includes(name) ? { printOutcome: printOutcome(error) } : {}),
                     // The slicer's own result.json; the message starts with its error_string and warnings.
                     // A slicer failure always carries slicer_report: the plain sentence a person sees, the slicer's words for the log.
                     // The report always says failed (a result.json that says success can still leave no output file).

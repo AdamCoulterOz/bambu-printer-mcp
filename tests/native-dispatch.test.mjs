@@ -18,7 +18,7 @@ const hazardousCommands = [
   { command: "clean_print_error", sequence_id: "1" },
 ];
 
-async function helper(t, { attempts = 1, ignoreTerm = false, noRequest = false, legacy = false, crash = false, printResult = 0 } = {}) {
+async function helper(t, { attempts = 1, ignoreTerm = false, noRequest = false, legacy = false, crash = false, printResult = 0, ordinaryExit = false, silentSuccess = false, extraReceipt = false, malformedReceipt = false, conflictingReceipts = false, firstReceipt = '' } = {}) {
   const directory = await trackedMkdtemp(path.join(os.tmpdir(), "bambu-native-dispatch-"));
   const events = path.join(directory, "events.jsonl");
   const executable = path.join(directory, "helper.mjs");
@@ -41,9 +41,15 @@ if (['--print-authorized','--command-authorized'].includes(process.argv[2]) && !
     const response = await lines.next();
     if(response.value !== 'native_dispatch_authorized='+attempt) process.exit(3);
     record({kind:'dispatched',attempt});
+    if (attempt===1 && ${JSON.stringify(firstReceipt)}==='negative') console.log('native_print result=-4030');
+    if (attempt===1 && ${JSON.stringify(firstReceipt)}==='success') console.log('native_print result=0');
   }
 }
-console.log('native_print result='+${printResult});
+if (${conflictingReceipts}) {console.log('native_print result=0');console.log('native_print result=-1');process.exit(1);}
+if (${ordinaryExit}) process.exit(1);
+if (${silentSuccess}) process.exit(0);
+if (${extraReceipt}) console.log('native_print result=-4030');
+console.log('native_print result='+${printResult}+(${malformedReceipt}?' arbitrary-suffix':''));
 if (${crash}) process.kill(process.pid, 'SIGTERM');
 else process.exit(${printResult} === 0 ? 0 : 20);
 `, { mode: 0o755 });
@@ -83,7 +89,7 @@ for (const rejectAt of [1, 2]) test(`native validation failure prevents dispatch
   let checks = 0;
   await assert.rejects(printWithBambuNative(options, undefined, { beforeDispatch: async () => {
     if (++checks === rejectAt) throw new Error("Fresh printer state is RUNNING");
-  } }), /Fresh printer state is RUNNING/);
+  } }), /Fresh printer safety check failed \(state\)/);
   assert.equal(checks, rejectAt);
   assert.equal((await events()).filter(e => e.kind === "dispatched").length, rejectAt - 1);
 });
@@ -233,9 +239,9 @@ int main(int argc, char **argv) {
       checks++;
       if (checks === 2) throw new Error("Printer became busy before certificate retry");
     },
-  }), /Printer became busy before certificate retry/);
+  }), /Fresh printer safety check failed \(state\)/);
   assert.equal(checks, 2);
-  assert.deepEqual(updates.filter(line => line.startsWith("stub_dispatch=")), ["stub_dispatch=1"]);
+  assert.deepEqual(updates.filter(line => line.startsWith("stub_dispatch=")), [], "raw helper text is not exposed");
 
   const teardownCrash = spawnSync(executable, [], {
     env: {...process.env, STUB_CRASH_TEARDOWN:'1', BAMBU_NATIVE_HOST:'127.0.0.1',
@@ -336,4 +342,162 @@ int main() {
   const refused = spawnSync(executable, [], { encoding: "utf8", timeout: 15000, env: { ...env, STUB_SEND_RESULT: "-1" } });
   assert.equal(refused.signal, null, refused.stderr);
   assert.equal(refused.status, 20, "a refused command keeps its failure code");
+});
+
+async function diagnosticHelper(t, { hang = true } = {}) {
+  const directory = await trackedMkdtemp(path.join(os.tmpdir(), 'bambu-native-diag-'));
+  const executable = path.join(directory, 'helper.mjs'), events = path.join(directory, 'events.jsonl');
+  await fs.writeFile(events, '');
+  await fs.writeFile(executable, `#!/usr/bin/env node
+import {appendFileSync} from 'node:fs';import {createInterface} from 'node:readline';
+appendFileSync(${JSON.stringify(events)},JSON.stringify({kind:'started',pid:process.pid})+'\\n');
+process.on('SIGTERM',()=>{});
+console.log('native_connect status=0 dev=PRIVATE_SERIAL msg=PRIVATE_TOKEN');
+console.log('native_update_cert result=0 stage=connected');
+console.log('native_update status=1 code=12 msg=PRIVATE_TOKEN');
+console.log('native_dispatch_request=1');
+const lines=createInterface({input:process.stdin})[Symbol.asyncIterator]();
+const result=await lines.next();
+if(result.value==='native_dispatch_authorized=1')appendFileSync(${JSON.stringify(events)},JSON.stringify({kind:'dispatched'})+'\\n');
+${hang ? 'setInterval(()=>{},1000);' : "console.log('native_print result=0');process.exit(0);"}
+`, {mode:0o755});
+  const platform=Object.getOwnPropertyDescriptor(process,'platform'), previous=process.env.BAMBU_NATIVE_HELPER;
+  Object.defineProperty(process,'platform',{value:'darwin'});process.env.BAMBU_NATIVE_HELPER=executable;
+  t.after(async()=>{Object.defineProperty(process,'platform',platform);if(previous===undefined)delete process.env.BAMBU_NATIVE_HELPER;else process.env.BAMBU_NATIVE_HELPER=previous;await fs.rm(directory,{recursive:true,force:true});});
+  return async()=>{const text=await fs.readFile(events,'utf8');return text.trim().split('\n').filter(Boolean).map(JSON.parse)};
+}
+
+test('native deadline revokes pending authorization, waits for termination and retains safe stages', async t => {
+  const events=await diagnosticHelper(t);let release,entered;
+  const wait=new Promise(resolve=>{release=resolve}), pendingCheck=new Promise(resolve=>{entered=resolve});
+  const updates=[];const started=Date.now();let hooks=0;
+  const work=printWithBambuNative(options,line=>updates.push(line),{timeoutMs:5000,beforeDispatch:async()=>{entered();await wait;},onDispatchAuthorized:()=>{hooks++}});
+  const rejection=assert.rejects(work,error=>{
+    assert.match(error.message,/timed out/i);assert.equal(error.name,'NativeOperationError');
+    assert.equal(error.diagnostics.phase,'authorization_pending');assert.equal(error.diagnostics.authorizationRequests,1);assert.equal(error.diagnostics.authorizedAttempts,0);
+    assert.ok(error.diagnostics.events.some(event=>event.stage==='printer_connection'));
+    assert.ok(error.diagnostics.events.some(event=>event.stage==='certificate_update'));
+    assert.ok(error.diagnostics.events.some(event=>event.stage==='progress'&&event.status===1&&event.code===12));
+    assert.doesNotMatch(JSON.stringify(error.diagnostics)+error.message,/PRIVATE_TOKEN|PRIVATE_SERIAL/);
+    return true;
+  });
+  await Promise.race([pendingCheck,rejection.then(()=>{throw Error('helper expired before the safety callback')})]);await rejection;assert.ok(Date.now()-started<15000);
+  const all=await events();assert.throws(()=>process.kill(all[0].pid,0),{code:'ESRCH'});
+  release();await new Promise(resolve=>setTimeout(resolve,100));assert.equal((await events()).some(e=>e.kind==='dispatched'),false);assert.equal(hooks,0);
+  assert.doesNotMatch(JSON.stringify(updates),/PRIVATE_TOKEN|PRIVATE_SERIAL/);
+});
+
+test('native safety callback failure reports only a safe cause classification',async t=>{
+  const events=await diagnosticHelper(t);const updates=[];
+  await assert.rejects(printWithBambuNative(options,line=>updates.push(line),{timeoutMs:10000,beforeDispatch:async()=>{throw Error('connection timeout PRIVATE_TOKEN PRIVATE_SERIAL')}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.equal(error.diagnostics.phase,'safety_check_failed');assert.equal(error.diagnostics.safetyReason,'connection-timeout');
+    assert.doesNotMatch(JSON.stringify(error.diagnostics)+error.message,/PRIVATE_TOKEN|PRIVATE_SERIAL/);return true;
+  });
+  assert.equal((await events()).some(e=>e.kind==='dispatched'),false);assert.doesNotMatch(JSON.stringify(updates),/PRIVATE_TOKEN|PRIVATE_SERIAL/);
+});
+
+test('native successful print updates omit arbitrary plug-in content',async t=>{
+  await diagnosticHelper(t,{hang:false});const updates=[];
+  const result=await printWithBambuNative(options,line=>updates.push(line),{timeoutMs:10000,beforeDispatch:async()=>{}});
+  assert.equal(result.status,'success');assert.doesNotMatch(JSON.stringify(result)+JSON.stringify(updates),/PRIVATE_TOKEN|PRIVATE_SERIAL/);
+  assert.ok(updates.some(line=>line==='native_update status=1 code=12 msg=progress'));
+});
+
+
+test('native dispatch bookkeeping happens only after safety and before the helper receives authorization',async t=>{
+  const events=await helper(t);let hooks=0;
+  const result=await printWithBambuNative(options,undefined,{beforeDispatch:async()=>{assert.equal(hooks,0)},onDispatchAuthorized:()=>{hooks++}});
+  assert.equal(result.status,'success');assert.equal(hooks,1);assert.equal((await events()).filter(e=>e.kind==='dispatched').length,1);
+});
+
+test('known printer refusal retains its stable code without echoing unsafe detail',async t=>{
+  await diagnosticHelper(t);const {PrinterRefusal}=await import('../dist/refusal.js');
+  await assert.rejects(printWithBambuNative(options,undefined,{timeoutMs:10000,beforeDispatch:async()=>{throw new PrinterRefusal('printer-not-ready','PRIVATE_TOKEN PRIVATE_SERIAL')}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.equal(error.refusalCode,'printer-not-ready');assert.match(error.message,/not safely idle/);
+    assert.doesNotMatch(JSON.stringify(error.diagnostics)+error.message,/PRIVATE_TOKEN|PRIVATE_SERIAL/);return true;
+  });
+});
+
+test('late native safety completion cannot record dispatch or mark a print after deadline',async t=>{
+  const events=await diagnosticHelper(t);const {withPrintDispatch,markPrintCommandSent,printOutcome}=await import('../dist/refusal.js');let release,entered,hooks=0;
+  const gate=new Promise(resolve=>{release=resolve}),waiting=new Promise(resolve=>{entered=resolve});
+  await withPrintDispatch(async()=>{
+    const work=printWithBambuNative(options,undefined,{timeoutMs:5000,beforeDispatch:async()=>{entered();await gate},onDispatchAuthorized:()=>{hooks++;markPrintCommandSent()}});
+    const checked=work.then(()=>{throw Error('unexpected success')},error=>{assert.equal(printOutcome(error),'not-sent');assert.equal(error.diagnostics.authorizationRequests,1)});
+    await Promise.race([waiting,checked.then(()=>{throw Error('helper expired before the safety callback')})]);await checked;release();await new Promise(resolve=>setTimeout(resolve,100));assert.equal(hooks,0);assert.equal((await events()).some(e=>e.kind==='dispatched'),false);
+  });
+});
+
+test('expired helper waits for process exit but not a descendant holding its stdout pipe',async t=>{
+  const directory=await trackedMkdtemp(path.join(os.tmpdir(),'native-pipe-')), executable=path.join(directory,'helper.mjs'),events=path.join(directory,'pid');
+  await fs.writeFile(executable,`#!/usr/bin/env node
+import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';
+process.on('SIGTERM',()=>{});
+const child=spawn(process.execPath,['-e','setTimeout(()=>process.exit(0),20000)'],{stdio:['ignore',process.stdout,process.stderr],detached:true});child.unref();
+writeFileSync(${JSON.stringify(events)},JSON.stringify({pid:process.pid,descendant:child.pid}));
+console.log('native_dispatch_request=1');setInterval(()=>{},1000);
+`,{mode:0o755});
+  const platform=Object.getOwnPropertyDescriptor(process,'platform'),previous=process.env.BAMBU_NATIVE_HELPER;Object.defineProperty(process,'platform',{value:'darwin'});process.env.BAMBU_NATIVE_HELPER=executable;
+  let descendantPid;
+  t.after(async()=>{if(descendantPid)try{process.kill(descendantPid,'SIGTERM')}catch{}Object.defineProperty(process,'platform',platform);if(previous===undefined)delete process.env.BAMBU_NATIVE_HELPER;else process.env.BAMBU_NATIVE_HELPER=previous;await fs.rm(directory,{recursive:true,force:true});});
+  let entered;const waiting=new Promise(resolve=>{entered=resolve});
+  const started=Date.now(),work=printWithBambuNative(options,undefined,{timeoutMs:5000,beforeDispatch:()=>{entered();return new Promise(()=>{})}});
+  const rejected=assert.rejects(work,/timed out/);
+  await Promise.race([waiting,rejected.then(()=>{throw Error('helper expired before the safety callback')})]);
+  const {pid,descendant}=JSON.parse(await fs.readFile(events,'utf8'));descendantPid=descendant;
+  await rejected;
+  assert.ok(Date.now()-started<15000,'must not wait for descendant pipe holder');assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+  assert.doesNotThrow(()=>process.kill(descendantPid,0),'descendant still holds the inherited pipe when the helper settles');
+});
+
+
+test('ordinary helper failure without an explicit rejection after authorization remains uncertain',async t=>{
+  const events=await helper(t,{ordinaryExit:true});
+  await assert.rejects(printWithBambuNative(options,undefined,{beforeDispatch:async()=>{}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.match(error.message,/uncertain.*may.*accepted.*before retrying/i);
+    assert.equal(error.diagnostics.authorizedAttempts,1);return true;
+  });
+  assert.equal((await events()).filter(event=>event.kind==='dispatched').length,1);
+});
+
+
+test('zero exit without a print receipt after authorization remains uncertain',async t=>{
+  const events=await helper(t,{silentSuccess:true});
+  await assert.rejects(printWithBambuNative(options,undefined,{beforeDispatch:async()=>{}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.match(error.message,/uncertain.*without.*receipt/i);assert.equal(error.diagnostics.authorizedAttempts,1);return true;
+  });assert.equal((await events()).filter(e=>e.kind==='dispatched').length,1);
+});
+test('explicit failed attempt followed by one successful receipt is accepted',async t=>{
+  const events=await helper(t,{extraReceipt:true});const result=await printWithBambuNative(options,undefined,{beforeDispatch:async()=>{}});
+  assert.equal(result.status,'success');assert.equal((await events()).filter(e=>e.kind==='dispatched').length,1);
+});
+
+
+test('a success-looking receipt with arbitrary suffix is not accepted',async t=>{
+  const events=await helper(t,{malformedReceipt:true});
+  await assert.rejects(printWithBambuNative(options,undefined,{beforeDispatch:async()=>{}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.match(error.message,/uncertain.*without.*receipt/i);assert.equal(error.diagnostics.authorizedAttempts,1);return true;
+  });assert.equal((await events()).filter(e=>e.kind==='dispatched').length,1);
+});
+
+
+test('conflicting success and rejection receipts remain uncertain',async t=>{
+  const events=await helper(t,{conflictingReceipts:true});
+  await assert.rejects(printWithBambuNative(options,undefined,{beforeDispatch:async()=>{}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.match(error.message,/uncertain.*may.*accepted.*before retrying/i);return true;
+  });assert.equal((await events()).filter(e=>e.kind==='dispatched').length,1);
+});
+
+
+test('earlier negative receipt cannot classify later authorized exit without a receipt',async t=>{
+  const events=await helper(t,{attempts:2,firstReceipt:'negative',ordinaryExit:true});
+  await assert.rejects(printWithBambuNative(options,undefined,{beforeDispatch:async()=>{}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.match(error.message,/uncertain/i);assert.equal(error.diagnostics.authorizedAttempts,2);return true;
+  });assert.equal((await events()).filter(e=>e.kind==='dispatched').length,2);
+});
+test('earlier success receipt cannot authorize later attempt with no receipt',async t=>{
+  const events=await helper(t,{attempts:2,firstReceipt:'success',silentSuccess:true});
+  await assert.rejects(printWithBambuNative(options,undefined,{beforeDispatch:async()=>{}}),error=>{
+    assert.equal(error.name,'NativeOperationError');assert.match(error.message,/uncertain.*receipt/i);assert.equal(error.diagnostics.authorizedAttempts,2);return true;
+  });assert.equal((await events()).filter(e=>e.kind==='dispatched').length,2);
 });

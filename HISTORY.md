@@ -21,3 +21,9 @@ Added optional `fresh: true` to `get_printer_status` using the existing shared b
 ## 2026-11-15 — Bounded private signed-control trial
 
 After expanding the separate device trust-bundle cap to eight CA certificates while retaining the six-certificate chain limit and existing strict checks, operator-provided application and device trust validated. Fresh X2D status returned a matching identity, with observation age 11 ms, FINISH at 100%, zero print error and no HMS entries. An authorized signed cloud 20% part-fan request received broker acknowledgement and fresh raw fan telemetry changed from 0 to 1. Acknowledged 0% restoration initially reported 2 and subsequently returned to 0 with matching fresh identity, zero error and no HMS entries. Raw values are unscaled: neither the requested percentage nor a broker acknowledgement proves fan RPM or rotation. No print, heater, axis, native upload or native print was tested; the next print remains subject to a fresh preflight. This private trial does not qualify other models or firmware or satisfy the upstream four-client audit.
+
+## 2026-11-16 — First private native-print attempt
+
+The first authorized private native-print attempt reached the client deadline without a helper receipt. A later fresh matching-printer report showed an older completed job and an idle printer; neither that observation nor a missing flight record proves whether the dispatch occurred. The outcome remains unknown and no physical-print qualification is claimed.
+
+The accepted lifecycle repair bounds fresh safety collection and native helper execution, prevents late authorization, and records dispatch bookkeeping synchronously at the final authorization boundary. Success requires an unambiguous receipt for the latest authorized attempt; uncertain outcomes are not replayed. Focused fixtures and independent review support the change; physical-print qualification remains unestablished.

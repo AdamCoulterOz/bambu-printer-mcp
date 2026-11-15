@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- Bound native-print safety collection and helper execution, prevent late authorization after expiry, and retain allowlisted native diagnostics in existing errors. Require an unambiguous success receipt for the latest authorized attempt. A missing flight record or helper receipt does not prove an uncertain dispatch was not sent; no automatic replay is added.
+
 - Accept up to eight CA certificates in an operator-provided device trust bundle, independently of the six-certificate chain limit. Preserve the existing size, trust and certificate-validation checks.
 
 Synthetic, mocked and local MCP protocol coverage is supplemented by one authorized private X2D signed-cloud part-fan trial: fresh raw telemetry changed after an acknowledged 20% request and returned to zero after an acknowledged restoration. Raw values do not establish RPM or rotation. This does not qualify other controls, models or firmware, account login, native upload or printing, heating, motion or physical printing; an upstream PR remains subject to the four-client audit.

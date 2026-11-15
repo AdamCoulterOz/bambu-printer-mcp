@@ -1,3 +1,4 @@
+import { type RefusalCode } from "./refusal.js";
 export type BambuNativePrintOptions = {
     host: string;
     serial: string;
@@ -35,6 +36,25 @@ export type BambuNativeControlOptions = {
     qos?: number;
     flag?: number;
 };
+/** Only bounded stage names, elapsed times and numeric status codes cross the MCP boundary. */
+export type NativeDiagnostics = {
+    phase: string;
+    elapsedMs: number;
+    authorizationRequests: number;
+    authorizedAttempts: number;
+    safetyReason?: "connection-timeout" | "identity" | "state" | "other";
+    events: Array<{
+        stage: string;
+        elapsedMs: number;
+        status?: number;
+        code?: number;
+    }>;
+};
+export declare class NativeOperationError extends Error {
+    readonly diagnostics: NativeDiagnostics;
+    readonly refusalCode?: RefusalCode | undefined;
+    constructor(message: string, diagnostics: NativeDiagnostics, refusalCode?: RefusalCode | undefined);
+}
 export type BambuNativeUpdateCallback = (line: string) => void;
 export type BambuNativeExecution = {
     signal?: AbortSignal;
@@ -42,6 +62,10 @@ export type BambuNativeExecution = {
     assertActive?: () => void;
     /** Read and validate fresh printer state immediately before each guarded dispatch. */
     beforeDispatch?: () => Promise<void>;
+    /** Synchronous authorization-boundary bookkeeping, immediately before the helper pipe write. */
+    onDispatchAuthorized?: () => void;
+    /** Internal bounded helper budget; not exposed as an MCP argument. */
+    timeoutMs?: number;
 };
 export type BambuNativeFanCommand = {
     fan: "part" | "auxiliary" | "right_auxiliary" | "chamber";
