@@ -165,7 +165,10 @@ class TransferSession {
           offset += take; this.headerUsed += take;
           if (this.headerUsed !== 16) continue;
           const size = this.header.readUInt32LE(0);
-          this.payloadMagic = this.header.readUInt32LE(4);
+          // RX byte 7 varies on observed X2D replies carrying ordinary correlated
+          // JSON. Its cause is unknown: validate the marker/channel, not that byte.
+          // Normalize only received frames; transmitted full constants stay intact.
+          this.payloadMagic = this.header.readUInt32LE(4) & 0x00ffffff;
           if (size > MAX_FRAME) throw this.error('bounds');
           // The final DWORD is reserved, not an authenticated status or length.
           // X2D replies can leave it nonzero; send zero, but do not interpret it.

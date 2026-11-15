@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Accept the opaque received storage-frame header byte observed to vary on valid list replies, while validating the frame marker, channel and correlated inner reply. Sending and TLS, authentication, integrity and deadline checks remain unchanged. Read-only list evidence does not establish an upload or print.
+
 - Accept the opaque reserved field in received printer-storage frame headers while keeping outgoing reserved fields zero and retaining strict TLS, expected frame magic, login acknowledgement, integrity and deadline checks. The first private upload-only attempt failed at login before an upload receipt; no print or live upload qualification is implied.
 
 - Align the MQTT transport connection timeout with the existing 10-second connection bound and report sanitized connection diagnostics for initial or confirmation print safety checks. An in-memory delayed-CONNACK fixture reproduced the earlier 2-second timeout mechanism; it does not establish the cause of any live failure. No automatic retry or safety bypass is added.

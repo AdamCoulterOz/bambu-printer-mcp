@@ -58,7 +58,7 @@ class Peer {
     const json = { mtype: request.mtype, sequence: request.sequence, ...(request.cmdtype === undefined ? {} : { cmdtype: request.cmdtype }), result, ...(reply === undefined ? {} : { reply }) };
     this.json?.(json, request);
     const payload = Buffer.from(JSON.stringify(json));
-    socket.deliver(frame(0x0002013f, binary === undefined ? payload : Buffer.concat([payload, Buffer.from('\n\n'), binary]), this.controlReserved ?? 0));
+    socket.deliver(frame(this.controlMagic ?? 0x0002013f, binary === undefined ? payload : Buffer.concat([payload, Buffer.from('\n\n'), binary]), this.controlReserved ?? 0));
   }
   receive(socket, bytes) {
     const magic = bytes.readUInt32LE(4); const payload = bytes.subarray(16);
@@ -69,7 +69,7 @@ class Peer {
       assert.equal(payload.subarray(8).toString(), 'TESTCODE');
       if (this.loginReply?.(socket) === false) return;
       const status = Buffer.alloc(4); status.writeUInt32LE(this.loginStatus ?? 0);
-      socket.deliver(frame(0x0001013f, status, this.loginReserved ?? 0)); return;
+      socket.deliver(frame(this.loginMagic ?? 0x0001013f, status, this.loginReserved ?? 0)); return;
     }
     assert.equal(magic, 0x0102013f);
     const separator = payload.indexOf('\n\n');
@@ -358,6 +358,44 @@ test('nonzero opaque reserved DWORDs in login and control replies are accepted',
   for (const bytes of f.peer.socket.writes) assert.equal(bytes.readUInt32LE(12), 0, 'TX reserved stays zero');
 });
 
+test('opaque RX byte7 permits a complete correlated login/control/upload/readback flow', async t => {
+  const f = await fixture(t, { loginMagic: 0xa301013f, controlMagic: 0xb102013f, loginReserved: 7, controlReserved: 9, progressReplies: true });
+  const result = await f.invoke();
+  assert.equal(result.sha256, f.options.snapshotSha256); assert.equal(result.verifiedBy, 'readback');
+  assert.equal(f.peer.chunks.length, 3);
+  for (const bytes of f.peer.socket.writes) {
+    assert.ok([0x0101013f, 0x0102013f].includes(bytes.readUInt32LE(4)), 'TX full magic is unchanged');
+    assert.equal(bytes.readUInt32LE(12), 0);
+  }
+});
+
+for (const [label, magic] of [['marker', 0xa302023f], ['channel for reply stage', 0xa301013f], ['unknown channel', 0xa303013f]]) test(`wrong RX ${label} rejects even correlated valid JSON before file writes`, async t => {
+  const f = await fails(t, { before(socket, req) {
+    if (req.cmdtype !== 7) return;
+    const json = { mtype: 12289, cmdtype: req.cmdtype, sequence: req.sequence, result: 0,
+      reply: { storage: ['emmc'], upload_storage: ['emmc'], allow_internal_model_download: true } };
+    socket.deliver(frame(magic, Buffer.from(JSON.stringify(json)))); return false;
+  } }, 'protocol', 'capability');
+  assert.equal(f.peer.chunks.length, 0); assert.equal(f.peer.commands.some(r => r.cmdtype === 5), false);
+});
+
+test('an echoed 16-byte login request is never accepted as the four-byte status ACK', async t => {
+  const f = await fails(t, { loginReply(socket) {
+    socket.deliver(frame(0x0101013f, socket.writes.at(-1).subarray(16))); return false;
+  } }, 'remote-rejected', 'login');
+  assert.equal(f.peer.commands.length, 0); assert.equal(f.peer.chunks.length, 0);
+});
+
+for (const field of ['cmdtype', 'sequence']) test(`opaque RX byte7 never substitutes for exact inner ${field} correlation`, async t => {
+  const f = await fails(t, { controlMagic: 0xaa02013f, before(socket, req) {
+    if (req.cmdtype !== 7) return;
+    this.send(socket, { ...req, [field]: req[field] + 1 }, 0,
+      { storage: ['emmc'], upload_storage: ['emmc'], allow_internal_model_download: true });
+    queueMicrotask(() => socket.emit('end')); return false;
+  } }, 'closed', 'capability');
+  assert.equal(f.peer.chunks.length, 0); assert.equal(f.peer.commands.some(r => r.cmdtype === 5), false);
+});
+
 test('coalesced control replies with opaque reserved DWORDs retain cmd/sequence correlation', async t => {
   const f = await fixture(t, { loginReserved: 0x13579bdf, controlReserved: 0x13579bdf, before(socket, req) {
     if (req.cmdtype !== 7) return;
@@ -371,7 +409,7 @@ test('coalesced control replies with opaque reserved DWORDs retain cmd/sequence 
 });
 
 test('nonzero reserved cannot hide a rejected login ACK status', async t => {
-  const f = await fails(t, { loginReserved: 0x13579bdf, loginStatus: 1 }, 'remote-rejected', 'login');
+  const f = await fails(t, { loginMagic: 0xa301013f, loginReserved: 0x13579bdf, loginStatus: 1 }, 'remote-rejected', 'login');
   assert.equal(f.peer.commands.length, 0); assert.equal(f.peer.chunks.length, 0);
 });
 

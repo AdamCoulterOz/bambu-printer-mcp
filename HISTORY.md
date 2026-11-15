@@ -40,3 +40,7 @@ Added a candidate capability-driven direct internal-storage 3MF transfer and rea
 ## 2026-11-16 — Storage login interoperability
 
 The first private signed-route upload-only attempt failed in login framing before an upload receipt. A subsequent strict-TLS login probe returned the expected acknowledgement magic, length and sequence with a nonzero opaque reserved field. The receiver now permits that field while retaining the other login and transport checks; outgoing reserved fields remain zero. Focused fixtures cover the correction and typed failure diagnostics without retry. This observation does not qualify an upload or physical print.
+
+## 2026-11-16 — Storage list interoperability
+
+A strict-TLS read-only session authenticated, completed setup, reported internal and external storage capabilities, and listed files through the supported selectors. Valid correlated list replies had a varying opaque header byte, which the initial parser rejected before upload. The receiver now treats that byte as opaque while retaining marker, channel and inner reply validation; transmitted framing and other security checks remain unchanged. The initial upload-only request stopped before writing a file, and this read-only evidence does not qualify an upload or print.
