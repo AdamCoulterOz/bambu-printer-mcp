@@ -13,4 +13,5 @@ export declare function withRequestOwner<T>(server: Server, extra: {
 export declare function requestOwner(): {
     server: Server;
     signal: AbortSignal;
+    requestId: RequestId;
 };

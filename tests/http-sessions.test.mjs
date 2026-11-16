@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { request as nodeRequest } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -262,11 +262,19 @@ test("actual MCP owner shares its Bambu connection store and routes both confirm
     return getPrinter(host, serial, token);
   });
   const beforeCancelledCommand = published.length;
+  let pendingRequestId;
+  const sendBeforeCancellation = a.transport.send.bind(a.transport);
+  a.transport.send = (message, options) => {
+    if (message.method === "tools/call" && message.params?.name === "set_print_speed") pendingRequestId = message.id;
+    return sendBeforeCancellation(message, options);
+  };
   const pendingCommand = a.client.callTool({name: "set_print_speed", arguments: {mode: "standard", bambu_serial: "01PDELAYHTTP"}}).catch(error => error);
   await lateEntered.promise;
+  const cancel = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Mcp-Session-Id": a.transport.sessionId}, body: JSON.stringify({jsonrpc: "2.0", method: "notifications/cancelled", params: {requestId: pendingRequestId}})});
+  assert.equal(cancel.status, 202);
   await a.transport.terminateSession(); await a.client.close();
   lateRelease.resolve(); await pendingCommand; await wait(20);
-  assert.equal(published.length, beforeCancelledCommand, "closed session must not publish when its pending connection resolves");
+  assert.equal(published.length, beforeCancelledCommand, "cancelled operation must not publish when its pending connection resolves");
   assert.deepEqual(cleaned, {printer: 0, camera: 0, login: 0, bridge: 0, fusion: 0, exit: 0});
   assert.notEqual((await b.client.callTool({name: "get_printer_status", arguments: {}})).isError, true);
   const c = await connect("owner-C", async () => ({action: "cancel"})); assert.ok((await c.client.listTools()).tools.length > 0);
@@ -380,7 +388,7 @@ BambuNetworkBridge.prototype.stop = async () => record("bridge");
 FusionMcpBridge.prototype.close = async () => record("fusion");
 accountManager.cancelInteractiveLogin = () => record("login");
 `);
-  const env = {...process.env, MCP_TRANSPORT: "streamable-http", MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0", MCP_HTTP_STATEFUL: "true", BAMBU_PRINTER_HOST: "fully-configured.invalid", BAMBU_PRINTER_SERIAL: "01PTEST", BAMBU_PRINTER_ACCESS_TOKEN: "SYNTHETIC", BAMBU_MODEL: "p1s", BAMBU_SIGNED_CONTROLS: "0", TEMP_DIR: path.join(directory, "temp")};
+  const env = {...process.env, MCP_TRANSPORT: "streamable-http", MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0", MCP_HTTP_STATEFUL: "false", BAMBU_PRINTER_HOST: "fully-configured.invalid", BAMBU_PRINTER_SERIAL: "01PTEST", BAMBU_PRINTER_ACCESS_TOKEN: "SYNTHETIC", BAMBU_MODEL: "p1s", BAMBU_SIGNED_CONTROLS: "0", TEMP_DIR: path.join(directory, "temp")};
   delete env.MCP_HTTP_BEARER_TOKEN; delete env.MCP_HTTP_BEARER_TOKEN_FILE;
   const child = spawn(process.execPath, ["--import", preload, path.join(root, "dist/index.js")], {cwd: directory, env, stdio: ["ignore", "pipe", "pipe"]});
   let stderr = "", stdout = ""; child.stdout.on("data", bytes => { stdout += bytes; });
@@ -453,4 +461,19 @@ test("SSE progress retains the client progress token and originating HTTP reques
   const results = await Promise.all([a.client.callTool({name: "owned", arguments: {id: "only-A-progress"}}, undefined, {onprogress: value => seen.push(["A", value.message])}), b.client.callTool({name: "owned", arguments: {id: "only-B-progress"}}, undefined, {onprogress: value => seen.push(["B", value.message])})]);
   assert.deepEqual(results.map(result => result.content[0].text), ["only-A-progress", "only-B-progress"]);
   assert.deepEqual(seen.sort(), [["A", "only-A-progress"], ["B", "only-B-progress"]]);
+});
+
+
+test("HTTP rejects obsolete stateful configuration and malformed boolean values", t => {
+  const directory=trackedMkdtempSync(path.join(os.tmpdir(),"http-config-test-"));
+  t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+  const index = pathToFileURL(fileURLToPath(new URL("../dist/index.js", import.meta.url))).href;
+  const code = `import {BambuPrinterMCPServer} from ${JSON.stringify(index)}; new BambuPrinterMCPServer();`;
+  const env={...process.env,MCP_TRANSPORT:"streamable-http",MCP_HTTP_HOST:"127.0.0.1",MCP_HTTP_PORT:"0",BAMBU_MODEL:"",BAMBU_PRINTER_HOST:"fully-configured.invalid",BAMBU_PRINTER_SERIAL:"fixture",BAMBU_PRINTER_ACCESS_TOKEN:"fixture",TEMP_DIR:path.join(directory,"temp")};
+  for(const [value,success] of [[undefined,true],["false",true],["true",false],["garbage",false]]) {
+    const childEnv={...env}; if(value===undefined) delete childEnv.MCP_HTTP_STATEFUL; else childEnv.MCP_HTTP_STATEFUL=value;
+    const child=spawnSync(process.execPath,["--input-type=module","-e",code],{cwd:directory,env:childEnv,encoding:"utf8",timeout:5000});
+    assert.equal(child.status,success?0:1,child.stderr);
+    if(!success) assert.match(child.stderr,value==="true"?/HTTP is now stateless.*MCP_HTTP_STATEFUL/s:/MCP_HTTP_STATEFUL must be a boolean/);
+  }
 });

@@ -1,0 +1,19 @@
+# Allow only build inputs; never send local environments, credentials or models.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!LICENSE
+!CONTRIBUTORS.md
+!patches/
+!patches/*.patch
+!scripts/
+!scripts/install-patches.mjs
+!scripts/signing-counter.c
+!scripts/signing-setup.mjs
+!src/
+!src/**/
+!src/**/*.ts
+!src/**/*.py
+!src/cad/requirements.in
+!src/cad/requirements.lock

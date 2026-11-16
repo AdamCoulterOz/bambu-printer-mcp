@@ -21,8 +21,10 @@ function withSlicerReport<T extends { slicer_result?: unknown }>(sliced: T): T &
 }
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { lazyJsonSchemaValidator } from "./lazy-json-schema-validator.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { HttpSessions, httpBearerToken } from "./http-sessions.js";
+import { httpBearerToken } from "./http-sessions.js";
+import { HttpRequests } from "./http-requests.js";
 import { requestOwner, withRequestOwner } from "./request-context.js";
 import {
   ListResourcesRequestSchema,
@@ -943,7 +945,6 @@ type RuntimeConfig = {
   httpHost: string;
   httpPort: number;
   httpPath: string;
-  statefulSession: boolean;
   enableJsonResponse: boolean;
   allowedOrigins: Set<string>;
   blenderBridgeCommand?: string;
@@ -1113,12 +1114,22 @@ function readRuntimeConfig(): RuntimeConfig {
       ? "streamable-http"
       : "stdio";
 
+  const stateful = process.env.MCP_HTTP_STATEFUL;
+  if (stateful !== undefined) {
+    const value = stateful.trim().toLowerCase();
+    if (!["1", "true", "yes", "on", "0", "false", "no", "off"].includes(value)) {
+      throw new Error("MCP_HTTP_STATEFUL must be a boolean; HTTP is stateless. Remove it or set it to false.");
+    }
+    if (parseBooleanEnv(stateful, false)) {
+      throw new Error("HTTP is now stateless; remove MCP_HTTP_STATEFUL or set it to false.");
+    }
+  }
+
   return {
     transport,
     httpHost: process.env.MCP_HTTP_HOST?.trim() || "127.0.0.1",
     httpPort: parsePort(process.env.MCP_HTTP_PORT, 3000),
     httpPath: normalizePath(process.env.MCP_HTTP_PATH),
-    statefulSession: parseBooleanEnv(process.env.MCP_HTTP_STATEFUL, true),
     enableJsonResponse: parseBooleanEnv(process.env.MCP_HTTP_JSON_RESPONSE, true),
     allowedOrigins: parseCsvEnv(process.env.MCP_HTTP_ALLOWED_ORIGINS),
     blenderBridgeCommand: process.env.BLENDER_MCP_BRIDGE_COMMAND?.trim() || undefined,
@@ -1489,8 +1500,9 @@ export class BambuPrinterMCPServer {
   private readonly fusionSetup = new FusionAddinSetup(() => addinAddress().port, FUSION_MCP_DEFAULT_ARGS, { ...defaultSetupSystem, tmp: TEMP_DIR });
   private stlManipulator: STLManipulator;
   private readonly runtimeConfig: RuntimeConfig;
-  private httpRuntime?: HttpSessions;
+  private httpRuntime?: HttpRequests;
   private shuttingDown = false;
+  private shutdownExitCode = 0;
   private readonly confirmationTimeoutMs = parseConfirmationTimeout(process.env.BAMBU_CONFIRMATION_TIMEOUT_MS);
 
   constructor() {
@@ -1498,7 +1510,7 @@ export class BambuPrinterMCPServer {
 
     this.bambu = new BambuImplementation(async message => {
       try {
-        const { server, signal } = requestOwner();
+        const { server, signal, requestId } = requestOwner();
         const response = await server.elicitInput({
           mode: "form",
           message,
@@ -1507,7 +1519,7 @@ export class BambuPrinterMCPServer {
             properties: { confirmed: { type: "boolean", title: "I checked the printer and confirm this operation", default: false } },
             required: ["confirmed"],
           },
-        }, { timeout: this.confirmationTimeoutMs, signal });
+        }, { timeout: this.confirmationTimeoutMs, signal, relatedRequestId: requestId });
         if (response.action === "accept" && response.content?.confirmed !== true) {
           throw new Error("Hardware confirmation checkbox was not checked. Check it only after inspecting the printer, or cancel. No command was sent.");
         }
@@ -1533,6 +1545,7 @@ export class BambuPrinterMCPServer {
     const server = new Server(
       SERVER_INFO,
       {
+        jsonSchemaValidator: lazyJsonSchemaValidator,
         capabilities: {
           prompts: {},
           resources: {},
@@ -1579,7 +1592,7 @@ export class BambuPrinterMCPServer {
 
     // No model from args or env — ask the user via elicitation
     try {
-      const { server, signal } = requestOwner();
+      const { server, signal, requestId } = requestOwner();
       const result = await server.elicitInput({
         mode: "form" as const,
         message:
@@ -1610,7 +1623,7 @@ export class BambuPrinterMCPServer {
           },
           required: ["bambu_model"],
         },
-      }, { timeout: this.confirmationTimeoutMs, signal });
+      }, { timeout: this.confirmationTimeoutMs, signal, relatedRequestId: requestId });
 
       if (result.action === "accept" && result.content?.bambu_model) {
         return validateBambuModel(String(result.content.bambu_model));
@@ -5529,13 +5542,20 @@ export class BambuPrinterMCPServer {
   }
 
   async shutdown(exitCode = 0) {
+    if (exitCode !== 0) this.shutdownExitCode = exitCode;
     if (this.shuttingDown) return;
     this.shuttingDown = true;
-    const deadline = setTimeout(() => process.exit(exitCode), 5_000);
+    const deadline = setTimeout(() => process.exit(this.shutdownExitCode), 5_000);
     deadline.unref();
     try {
       // Revoke client requests before cleaning up process-owned resources.
       const protocol = await Promise.allSettled([this.server.close(), this.httpRuntime?.close()]);
+      if (protocol.some(result => result.status === "rejected")) {
+        for (const result of protocol) if (result.status === "rejected") console.error("[MCP Shutdown]", result.reason);
+        console.error("[MCP Shutdown] Active operations did not settle; shared backend cleanup was skipped and outcomes may be unknown.");
+        this.shutdownExitCode = 1;
+        return;
+      }
       const resources = await Promise.allSettled([
         Promise.resolve().then(() => accountManager.cancelInteractiveLogin()),
         Promise.resolve().then(() => this.bambu.cameraStreams.stopAll()),
@@ -5544,18 +5564,20 @@ export class BambuPrinterMCPServer {
       for (const result of [...protocol, ...resources]) if (result.status === "rejected") console.error("[MCP Shutdown]", result.reason);
     } finally {
       clearTimeout(deadline);
-      process.exit(exitCode);
+      process.exit(this.shutdownExitCode);
     }
   }
 
   async startHttp() {
-    const { httpHost, httpPort, httpPath, statefulSession, enableJsonResponse, allowedOrigins } =
+    const { httpHost, httpPort, httpPath, enableJsonResponse, allowedOrigins } =
       this.runtimeConfig;
 
-    if (!statefulSession) throw new Error("MCP_HTTP_STATEFUL=false is unsupported: parallel HTTP clients require stateful sessions.");
-    this.httpRuntime = new HttpSessions({
+    this.httpRuntime = new HttpRequests({
       host: httpHost, port: httpPort, path: httpPath, enableJsonResponse, allowedOrigins,
       allowedHosts: parseCsvEnv(process.env.MCP_HTTP_ALLOWED_HOSTS), bearerToken: httpBearerToken(),
+      serverInfo: SERVER_INFO,
+      onUnsettled: () => { console.error("[MCP Shutdown] An operation did not settle after cancellation; outcomes may be unknown. Forcing shutdown."); void this.shutdown(1); },
+      instructions: SERVER_INSTRUCTIONS + PRINT_EVIDENCE_GUIDANCE + AGENT_WORKFLOW_INSTRUCTIONS + (CAD_ENABLED ? " For headless dimensioned designs and parameter edits, read the cad_design prompt before using cad_run." : ""),
     }, () => this.createProtocolServer());
     await this.httpRuntime.listen();
     const address = this.httpRuntime.httpServer.address();

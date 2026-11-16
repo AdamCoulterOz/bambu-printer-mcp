@@ -35,6 +35,9 @@ test("readiness is a pure, conservative local summary", () => {
   assert.match(AGENT_WORKFLOW_TEXT, /--min-save.*SLICED.*does not resolve incomplete profiles/);
   const setup = getAgentGuideResource("bambu://workflow/setup");
   const signing = getAgentGuideResource("bambu://workflow/signing");
+  assert.match(setup, /stateless HTTP server shares a backend without an idle per-client session pool/);
+  assert.match(setup, /MCP_HTTP_STATEFUL may be omitted or set to false; true is obsolete and fails startup/);
+  assert.match(setup, /never automatically replays tool calls/);
   assert.match(setup, /preserve the person’s cloud and Bambu Handy preference/);
   assert.match(setup, /LAN Only disconnects cloud/);
   assert.match(signing, /do not switch to LAN Only automatically/);

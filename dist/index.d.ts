@@ -13,6 +13,7 @@ export declare class BambuPrinterMCPServer {
     private readonly runtimeConfig;
     private httpRuntime?;
     private shuttingDown;
+    private shutdownExitCode;
     private readonly confirmationTimeoutMs;
     constructor();
     /** Protocol peers share this owner's printer, camera, CAD and bridge resources. */

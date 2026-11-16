@@ -227,6 +227,24 @@ The optional FULU **BambuNetwork bridge** exposes `bambu_network_bridge_status`,
 
 </details>
 
+## Shared HTTP service
+
+Set `MCP_TRANSPORT=streamable-http` to serve multiple clients through one printer backend. HTTP uses transient protocol contexts for active requests; idle clients do not occupy a server session slot. Ordinary HTTP keep-alive connections may still exist temporarily. For a stdio-only client, `bambu-printer-mcp-http-client` connects to the existing service using `BAMBU_MCP_HTTP_URL` and a private `BAMBU_MCP_HTTP_TOKEN_FILE`; it does not start another backend.
+
+| Setting | HTTP behavior |
+| --- | --- |
+| `MCP_HTTP_STATEFUL` | Omit or set to `false` (the default). Explicit `true` or an invalid boolean stops startup; remove an old `true` setting when migrating. |
+| `MCP_HTTP_JSON_RESPONSE` | Defaults to `true` and prefers JSON for initialization and discovery. Interactive requests can still use SSE for confirmations. |
+| `MCP_HTTP_HOST`, `MCP_HTTP_PORT`, `MCP_HTTP_PATH` | Address and path, defaulting to `127.0.0.1`, `3000`, and `/mcp`. |
+| `MCP_HTTP_BEARER_TOKEN_FILE` | Private owner-only bearer token file. Alternatively use `MCP_HTTP_BEARER_TOKEN`, not both. |
+| `MCP_HTTP_ALLOWED_HOSTS`, `MCP_HTTP_ALLOWED_ORIGINS` | Optional comma-separated allowlists. Non-loopback HTTP requires bearer authentication and separate TLS protection; hostname and wildcard binds require an explicit Host allowlist. |
+
+Modern HTTP clients use the native MCP path. Legacy clients receive signed client-held compatibility metadata; restarting the service invalidates it. `GET` and `DELETE` return 405 (`Allow: POST, OPTIONS`), so DELETE does not revoke that metadata. The relay can reinitialize and retry discovery or ping after a confirmed expired ticket; it never automatically retries a tool call. If a request outcome is uncertain, check the printer or job state before any manual retry.
+
+Active requests share a bounded capacity. On the modern HTTP path, human confirmation retains the original operation for up to 10 minutes, within a 30-minute operation deadline; it does not replay the physical handler. Cancellation and client disconnection revoke only the affected operation's authority and do not shut down the shared printer backend. Print safety checks remain in force.
+
+The HTTP changes on this feature branch are unmerged, unpublished and not deployed to the existing service. Focused offline tests exercise both SDK paths and mocked backend behavior; real Claude and Codex app integration and printer control through the new implementation are not yet verified. See the [MCP transport specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports) and [TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) for protocol and SDK details.
+
 <details>
 <summary><strong>AMS (Automatic Material System) Setup</strong></summary>
 

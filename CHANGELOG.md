@@ -4,14 +4,16 @@
 
 ### Added
 
-- Add the candidate explicit `signed_mqtt` 3MF route: separately configured printer-storage TLS, capability and collision checks, upload and full size/SHA-256 readback, followed by checked signed MQTT project dispatch. `upload_file` supports upload-only; raw `upload_gcode` refuses this route. No automatic fallback or replay; this route is not yet deployed or live-qualified.
+- Add the candidate explicit `signed_mqtt` 3MF route: separately configured printer-storage TLS, capability and collision checks, upload and full size/SHA-256 readback, followed by checked signed MQTT project dispatch. `upload_file` supports upload-only; raw `upload_gcode` refuses this route. No automatic fallback or replay; a private X2D trial observed upload readback and a completed job, while wider model and physical-fit qualification remain open.
 
 - Add `get_printer_status({fresh:true})` for read-only fresh MQTT identity, state and error telemetry with a matching printer-returned serial and observation timestamps. Preserve default display status and existing internal print preflight behavior; this read does not authorize dispatch.
 
-- Share one printer backend among independent stateful HTTP MCP sessions and add a private-token stdio-to-HTTP client relay. Session closure leaves the backend running; `MCP_HTTP_STATEFUL=false` now fails startup.
+- Share one printer backend across stateless HTTP requests and add a private-token stdio-to-HTTP relay. Idle clients no longer occupy server session slots; legacy clients hold signed compatibility metadata, while modern clients use bounded operation continuations for confirmation. `MCP_HTTP_STATEFUL` must be absent or false; true fails startup. The relay recovers confirmed expired tickets for safe discovery only and never replays tool calls. Cancellation and client cleanup do not shut down the shared backend. The full suite passes 1,582 tests with 30 skips; Codex and Claude Code CLI metadata discovery passes through native HTTP and the relay. Claude Desktop GUI integration, real printer operations through this implementation and deployment remain unverified.
 - Add opt-in signed local and cloud MQTT controls with operator-provided signing material, independent device trust and an explicitly initialized persistent counter. Fail closed when signing prerequisites are missing; keep native file transfer separate and do not automatically replay uncertain dispatches.
 - Add optional Bambu account login through a temporary loopback browser, local session status and logout, and live bound-printer listing. Account authentication can supply signed cloud credentials; tokens are not returned by the tools.
 - Add `get_agent_guide`, task resources and `get_agent_readiness` for discoverable workflows, configuration metadata and local-only readiness. Existing `counterpart/1` setup fields remain unchanged.
+
+- Prepare Dockerfile and Compose packaging for a shared HTTP backend behind a separately managed secure proxy. Linux container build and deployment remain pending. Avoid eager AJV creation and retained schema caches with lazy, transient validation, and clear the SDK timer on close. A metadata-only benchmark verifies zero idle protocol contexts, not flat memory use.
 
 ### Fixed
 

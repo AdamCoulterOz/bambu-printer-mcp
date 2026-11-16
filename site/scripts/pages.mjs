@@ -42,7 +42,7 @@ export const PAGES = [
     route: 'guide/setup',
     title: 'Installation and configuration',
     description: 'Installation, environment variables, MCP client configuration, and LAN/Developer Mode setup.',
-    sources: [{ file: 'docs/SETUP.md', whole: true }],
+    sources: [{ file: 'docs/SETUP.md', whole: true }, { file: 'README.md', heading: 'Shared HTTP service' }],
   },
   {
     group: 'Start',

@@ -34,7 +34,7 @@ export function withRequestOwner(server, extra, run) {
     if (own)
         extra.signal = AbortSignal.any([extra.signal, own]);
     const signal = extra.signal;
-    return requests.run({ server, signal }, () => withOperationSignal(signal, run));
+    return requests.run({ server, signal, requestId: extra.requestId }, () => withOperationSignal(signal, run));
 }
 export function requestOwner() {
     const owner = requests.getStore();

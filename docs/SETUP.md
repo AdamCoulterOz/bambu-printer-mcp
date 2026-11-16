@@ -66,13 +66,23 @@ npm link
 
 Run one supervised server process with `MCP_TRANSPORT=streamable-http`, a loopback `MCP_HTTP_HOST`, and `MCP_HTTP_BEARER_TOKEN_FILE` pointing to an owner-only regular file containing a nonempty token without whitespace. Configure this process and client connections outside MCP; preserve existing client settings. The server reads the token at startup. The alternative `MCP_HTTP_BEARER_TOKEN` is an environment value: configure only one source. Never put tokens in source files or chat.
 
-Each client initializes its own stateful MCP session against the one shared backend. A session DELETE or idle expiry closes that client's protocol session, not the shared printer backend; process shutdown owns full cleanup. Elicitation and cancellation remain bound to their originating request. Sessions, request bodies and idle lifetime are bounded. The former `MCP_HTTP_STATEFUL=false` mode is unsupported and now fails startup; remove it or set `true` when migrating.
+HTTP uses transient per-request protocol contexts over one shared backend, with no idle per-client session pool. Modern and legacy clients use their respective HTTP paths; legacy clients hold signed compatibility metadata that becomes invalid when the service restarts. `GET` and `DELETE` return 405 (`Allow: POST, OPTIONS`); DELETE does not revoke that metadata. Elicitation and cancellation remain bound to the originating operation; client cleanup does not close the shared backend. Active operations and request bodies are bounded. Omit `MCP_HTTP_STATEFUL` or set it to `false`; explicit `true` and invalid boolean values fail startup. Remove or change an existing `true` setting when migrating.
 
 Prefer loopback for a private deployment. Non-loopback requires a bearer token. An explicit `MCP_HTTP_ALLOWED_HOSTS` list is recommended for every non-loopback deployment and required for hostname or wildcard binds; a literal IP bind without one enforces its exact Host. Configure allowed browser origins with `MCP_HTTP_ALLOWED_ORIGINS` when needed. The server itself is HTTP, not TLS: any non-loopback deployment also needs separately protected TLS transport. A successful connection does not verify printer operations.
 
 For direct HTTP clients, the current Codex CLI accepts `codex mcp add <name> --url <url> --bearer-token-env-var <variable-name>`; provide the token privately to the Codex process via that environment variable. Claude Code accepts `claude mcp add --transport http <name> <url> --header <authorization-header>`; its configured header contains a secret, so protect that client configuration. These are client configuration operations and do not start another backend.
 
-For a stdio-only client such as Claude Desktop, configure its stdio command as `bambu-printer-mcp-http-client`, with `BAMBU_MCP_HTTP_URL` and `BAMBU_MCP_HTTP_TOKEN_FILE` pointing to the service and an owner-only token file. The adapter is a protocol relay, not another printer server; it supports HTTPS or loopback HTTP, has no OAuth flow and does not replay requests. On stdin EOF it attempts to delete only its own session. An interrupted request can have an unknown outcome; check state before retrying. The server and client adapter must be available to their respective processes; no service manager is installed automatically.
+For a stdio-only client such as Claude Desktop, configure its stdio command as `bambu-printer-mcp-http-client`, with `BAMBU_MCP_HTTP_URL` and `BAMBU_MCP_HTTP_TOKEN_FILE` pointing to the service and an owner-only token file. The adapter is a protocol relay, not another printer server; it supports HTTPS or loopback HTTP, has no OAuth flow and never automatically replays tool calls. After confirmed expired compatibility metadata, it may reinitialize and retry safe discovery or ping. On stdin EOF it closes its own connection; the stateless service does not revoke metadata via DELETE. An interrupted request can have an unknown outcome; check state before retrying. The server and client adapter must be available to their respective processes; no service manager is installed automatically.
+
+### Container deployment
+
+`Dockerfile` builds a Node 24 Debian image with the patched dependency and one unprivileged server process. `compose.example.yaml` is a starting point for a single instance behind a separately managed reverse proxy. It publishes the backend only on the container host's loopback; the proxy must be able to reach that address, provide TLS, enforce the intended client authentication, and forward the exact configured Host. The server still requires its own private bearer token: if the proxy authenticates OAuth clients, it must replace their Authorization header with the backend token after authentication. The server itself does not validate OAuth tokens or implement OAuth discovery. Configure allowed browser origins explicitly if required; requests without Origin remain supported.
+
+Set `BAMBU_CONFIG_FILE`, `BAMBU_STATE_DIR`, `BAMBU_SECRETS_DIR`, and `BAMBU_UPSTREAM_HOST` in the deployment environment before running `docker compose -f compose.example.yaml up --build -d`. The config file contains ordinary server settings and must not set a second bearer token source. Store the backend token as `http-token` in the secrets directory, with no whitespace, owned by container UID 1000 and mode 0600. Mount signing keys, certificates, CRLs and device/storage trust files there read-only and reference their absolute `/run/bambu-secrets/...` paths in the config. Keep this file and the private directories outside the build context, and protect credentials in the config from other users. Configure only settings needed for the selected route.
+
+The persistent home directory must be private, writable and owned by UID 1000. It holds account and default resume/job state. Put `BAMBU_SIGNING_STATE_DIR` in a private persistent subdirectory there; the filesystem must permit executing its counter helper. Back up and preserve the existing counter before migration, stop the old backend before bringing up the new one, and do not run two independent copies against the same printer. A helper compiled on macOS cannot run on Linux: after copying the existing counter state, run the documented signing setup `--repair` in the Linux container as its unprivileged user to rebuild the helper without resetting the counter. Verify ownership and permissions on the transferred files. Counter coordination does not cover other applications or hosts. Account login uses a loopback browser on the server and needs a separately planned secure local access method in a container; a copied session does not prove live authentication.
+
+The image includes OpenSSL 3 and a C compiler for supported signing setup and repair. It does not include a slicer, slicer profile tree, Blender, Bambu Connect, vendor native SDK, or FULU plug-in. Mac application paths and native helper binaries do not migrate to Linux. For slicing, provide a compatible Linux slicer and its matching profiles through appropriately configured mounts, or configure the supported remote slicer and matching profile mirror; validate that setup separately. The signed project route does not require the macOS native helper. Container startup or metadata discovery does not prove authentication to Bambu, printer operation, or a physical print.
 
 ## Configuration
 
@@ -109,7 +119,7 @@ MCP_TRANSPORT=stdio               # Options: stdio (default), streamable-http
 MCP_HTTP_HOST=127.0.0.1
 MCP_HTTP_PORT=3000
 MCP_HTTP_PATH=/mcp
-MCP_HTTP_STATEFUL=true
+MCP_HTTP_STATEFUL=false
 MCP_HTTP_JSON_RESPONSE=true
 MCP_HTTP_ALLOWED_ORIGINS=http://localhost
 
@@ -170,8 +180,8 @@ FUSION_MCP_PORT=9877
 | `MCP_HTTP_HOST` | `127.0.0.1` | No | HTTP bind address (HTTP transport only) |
 | `MCP_HTTP_PORT` | `3000` | No | HTTP port (HTTP transport only) |
 | `MCP_HTTP_PATH` | `/mcp` | No | HTTP endpoint path (HTTP transport only) |
-| `MCP_HTTP_STATEFUL` | `true` | No | Stateful sessions are required; `false` is unsupported and fails startup |
-| `MCP_HTTP_JSON_RESPONSE` | `true` | No | Select JSON responses for Streamable HTTP |
+| `MCP_HTTP_STATEFUL` | `false` | No | Omit or set false; true and invalid booleans fail startup |
+| `MCP_HTTP_JSON_RESPONSE` | `true` | No | Prefer JSON for initialization and discovery; interactive calls can use SSE |
 | `MCP_HTTP_ALLOWED_ORIGINS` | | No | Comma-separated allowed browser Origin values; requests without Origin are allowed |
 | `MCP_HTTP_ALLOWED_HOSTS` | | No | Comma-separated exact HTTP Host headers, including port; configure explicitly for non-loopback deployments |
 | `MCP_HTTP_BEARER_TOKEN_FILE` | | No | Private owner-only token file; read once at startup. Set only one token source |

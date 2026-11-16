@@ -3,7 +3,7 @@ import { withOperationSignal } from "./operation-context.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { RequestId } from "@modelcontextprotocol/sdk/types.js";
 
-const requests = new AsyncLocalStorage<{ server: Server; signal: AbortSignal }>();
+const requests = new AsyncLocalStorage<{ server: Server; signal: AbortSignal; requestId: RequestId }>();
 const cancellations = new WeakMap<Server, Map<RequestId, AbortController>>();
 export function trackRequest(server: Server, id: RequestId): void {
   let tracked = cancellations.get(server);
@@ -31,9 +31,9 @@ export function withRequestOwner<T>(server: Server, extra: { signal: AbortSignal
   // Every HTTP operation combines its own lifetime with SDK/session cancellation.
   if (own) extra.signal = AbortSignal.any([extra.signal, own]);
   const signal = extra.signal;
-  return requests.run({ server, signal }, () => withOperationSignal(signal, run));
+  return requests.run({ server, signal, requestId: extra.requestId }, () => withOperationSignal(signal, run));
 }
-export function requestOwner(): { server: Server; signal: AbortSignal } {
+export function requestOwner(): { server: Server; signal: AbortSignal; requestId: RequestId } {
   const owner = requests.getStore();
   if (!owner) throw new Error("No requesting MCP client owns this confirmation. No command was sent.");
   owner.signal.throwIfAborted();
