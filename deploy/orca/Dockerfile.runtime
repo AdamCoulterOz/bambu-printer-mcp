@@ -1,0 +1,26 @@
+# Runtime-only image. Context must include the verified CI bundle under bundle/.
+FROM --platform=linux/amd64 ubuntu:24.04 AS unpack
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libfuse2t64 python3 && rm -rf /var/lib/apt/lists/*
+WORKDIR /bundle
+COPY bundle/ ./
+COPY verify_bundle.py /tmp/verify_bundle.py
+RUN set -eu; test "$(cat ORCA_COMMIT)" = 8cccdf82d00381942d9b664750457da318e7d068; \
+    test "$(wc -l < ORCA_COMMIT)" -eq 1; grep -Eq '^[0-9a-f]{40}$' BUILD_REPOSITORY_COMMIT; \
+    test "$(wc -l < BUILD_REPOSITORY_COMMIT)" -eq 1; python3 /tmp/verify_bundle.py; \
+    set -- build/OrcaSlicer_Linux_V*.AppImage; test "$#" -eq 1; test -f "$1"; \
+    test -f tools/mcp/orca_mcp.py; test -f LICENSE.txt; chmod +x "$1"; "$1" --appimage-extract; \
+    test -x squashfs-root/AppRun
+
+FROM --platform=linux/amd64 ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends python3 xvfb xauth libgl1-mesa-dri libgl1 libgtk-3-0t64 libwebkit2gtk-4.1-0 ca-certificates dbus-x11 libfuse2t64 && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 10001 orca
+COPY --from=unpack /bundle/squashfs-root/ /opt/orca/
+COPY --from=unpack /bundle/tools/mcp/ /opt/orca-harness/
+COPY --from=unpack /bundle/LICENSE.txt /opt/orca-license/LICENSE.txt
+COPY gateway.py supervisor.py workspace.py protocol.py orca_backend.py /opt/orca-runtime/
+USER 10001:10001
+WORKDIR /home/orca
+ENV HOME=/home/orca ORCA_MCP_SESSION=/home/orca/.cache/orca-mcp/session.json
+CMD ["python3", "/opt/orca-runtime/supervisor.py"]

@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!Dockerfile.runtime
+!gateway.py
+!supervisor.py
+!workspace.py
+!protocol.py
+!orca_backend.py
+!bundle/
+!bundle/**
+!verify_bundle.py

@@ -4,16 +4,18 @@
 
 ### Added
 
+- Prepare a separate Orca workspace runtime for the selected official development MCP and X2D profiles. Durable workspace IDs coordinate a single on-demand GUI worker with checkpoint/recovery, a private Unix socket gateway and no direct printer network. The source passed independent review and all 35 isolated Linux tests passed; the real image and synthetic X2D slice/export/restore and client qualification remain pending.
+
 - Add the candidate explicit `signed_mqtt` 3MF route: separately configured printer-storage TLS, capability and collision checks, upload and full size/SHA-256 readback, followed by checked signed MQTT project dispatch. `upload_file` supports upload-only; raw `upload_gcode` refuses this route. No automatic fallback or replay; a private X2D trial observed upload readback and a completed job, while wider model and physical-fit qualification remain open.
 
 - Add `get_printer_status({fresh:true})` for read-only fresh MQTT identity, state and error telemetry with a matching printer-returned serial and observation timestamps. Preserve default display status and existing internal print preflight behavior; this read does not authorize dispatch.
 
-- Share one printer backend across stateless HTTP requests and add a private-token stdio-to-HTTP relay. Idle clients no longer occupy server session slots; legacy clients hold signed compatibility metadata, while modern clients use bounded operation continuations for confirmation. `MCP_HTTP_STATEFUL` must be absent or false; true fails startup. The relay recovers confirmed expired tickets for safe discovery only and never replays tool calls. Cancellation and client cleanup do not shut down the shared backend. The full suite passes 1,582 tests with 30 skips; Codex and Claude Code CLI metadata discovery passes through native HTTP and the relay. Claude Desktop GUI integration, real printer operations through this implementation and deployment remain unverified.
+- Share one printer backend across stateless HTTP requests and add a private-token stdio-to-HTTP relay. Idle clients no longer occupy server session slots; legacy clients hold signed compatibility metadata, while modern clients use bounded operation continuations for confirmation. `MCP_HTTP_STATEFUL` must be absent or false; true fails startup. The relay recovers confirmed expired tickets for safe discovery only and never replays tool calls. Cancellation and client cleanup do not shut down the shared backend. The full suite passes 1,582 tests with 30 skips; Codex and Claude Code CLI metadata discovery passes through native HTTP and the relay. The private Linux service started and authenticated Codex metadata discovery succeeded; broader controls, printing and Claude Desktop GUI integration remain unverified.
 - Add opt-in signed local and cloud MQTT controls with operator-provided signing material, independent device trust and an explicitly initialized persistent counter. Fail closed when signing prerequisites are missing; keep native file transfer separate and do not automatically replay uncertain dispatches.
 - Add optional Bambu account login through a temporary loopback browser, local session status and logout, and live bound-printer listing. Account authentication can supply signed cloud credentials; tokens are not returned by the tools.
 - Add `get_agent_guide`, task resources and `get_agent_readiness` for discoverable workflows, configuration metadata and local-only readiness. Existing `counterpart/1` setup fields remain unchanged.
 
-- Prepare Dockerfile and Compose packaging for a shared HTTP backend behind a separately managed secure proxy. Linux container build and deployment remain pending. Avoid eager AJV creation and retained schema caches with lazy, transient validation, and clear the SDK timer on close. A metadata-only benchmark verifies zero idle protocol contexts, not flat memory use.
+- Prepare Dockerfile and Compose packaging for a shared HTTP backend behind a separately managed secure proxy. Avoid eager AJV creation and retained schema caches with lazy, transient validation, and clear the SDK timer on close. A metadata-only benchmark verifies zero idle protocol contexts, not flat memory use.
 
 ### Fixed
 
@@ -28,6 +30,8 @@
 - Accept up to eight CA certificates in an operator-provided device trust bundle, independently of the six-certificate chain limit. Preserve the existing size, trust and certificate-validation checks.
 
 Synthetic, mocked and local MCP protocol coverage is supplemented by one authorized private X2D signed-cloud part-fan trial: fresh raw telemetry changed after an acknowledged 20% request and returned to zero after an acknowledged restoration. Raw values do not establish RPM or rotation. This does not qualify other controls, models or firmware, account login, native upload or printing, heating, motion or physical printing; an upstream PR remains subject to the four-client audit.
+
+A separate Linux backend trial observed fresh matching X2D identity, FINISH, zero print error and no HMS entries. A signed 20% part-fan request returned a receipt and raw telemetry changed from 0 to 3/2. The first restoration outcome was uncertain; after a fresh same-job guard, a new 0% request returned a receipt and delayed fresh telemetry reported 0. Raw values do not establish RPM or rotation; this trial did not exercise printing, heating or motion.
 
 ## [1.1.94] – 2026-11-12
 
