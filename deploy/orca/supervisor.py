@@ -10,6 +10,7 @@ from gateway import Server, token_from_file
 from orca_backend import OrcaBackend
 from protocol import Router
 from workspace import Workspace, shutdown_or_exit
+from export_store import ExportStore, limits
 
 host=os.environ.get('ORCA_GATEWAY_HOST','')
 if not host or any(c in host for c in '\r\n/ '): raise SystemExit('invalid gateway Host')
@@ -17,7 +18,13 @@ token=token_from_file(os.environ['ORCA_GATEWAY_TOKEN_FILE'])
 os.umask(0o077)
 root=Path('/home/orca/.config/orca-shared'); root.mkdir(parents=True,exist_ok=True,mode=0o700)
 backend=OrcaBackend(root,os.environ.get('ORCA_PROFILE_TEMPLATE'),'/artifacts')
-workspace=Workspace(backend,int(os.environ.get('ORCA_IDLE_SECONDS','900')),int(os.environ.get('ORCA_HARD_SECONDS','14400')))
+export_store=None
+export_dir=os.environ.get('ORCA_EXPORT_DIR')
+if export_dir:
+    gid=os.environ.get('ORCA_ARTIFACT_GROUP_GID','')
+    if not gid.isascii() or not gid.isdigit() or int(gid)>2147483647: raise SystemExit('invalid artifact group GID')
+    export_store=ExportStore(export_dir,int(gid),'/artifacts',*limits(os.environ))
+workspace=Workspace(backend,int(os.environ.get('ORCA_IDLE_SECONDS','900')),int(os.environ.get('ORCA_HARD_SECONDS','14400')),export_store=export_store)
 
 def native(body, token, headers=None):
     conn=http.client.HTTPConnection('127.0.0.1',13619,timeout=120)

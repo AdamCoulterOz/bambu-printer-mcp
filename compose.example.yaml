@@ -27,3 +27,11 @@ services:
         source: ${BAMBU_SECRETS_DIR:?Set BAMBU_SECRETS_DIR to the private secrets directory}
         target: /run/bambu-secrets
         read_only: true
+    # Optional shared workspace file store (requires coordinated data-only mounts,
+    # verified shared supplementary GID, and private service-owned state first):
+    # group_add: ["${ARTIFACT_GROUP_GID}"]
+    # environment: BAMBU_ARTIFACT_DIR=/srv/bambu-artifacts,
+    #   BAMBU_ARTIFACT_OUTBOX_DIR=/srv/bambu-outbox,
+    #   BAMBU_ARTIFACT_GROUP_GID=${ARTIFACT_GROUP_GID}
+    # Mount the Node-owned store RW at /srv/bambu-artifacts and the Orca-owned
+    # outbox RO at /srv/bambu-outbox; never share private home or credentials.

@@ -14,13 +14,24 @@ RUN set -eu; test "$(cat ORCA_COMMIT)" = 8cccdf82d00381942d9b664750457da318e7d06
 
 FROM --platform=linux/amd64 ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends python3 xvfb xauth libgl1-mesa-dri libgl1 libgtk-3-0t64 libwebkit2gtk-4.1-0 ca-certificates dbus-x11 libfuse2t64 && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 xvfb xauth libgl1-mesa-dri libgl1 libopengl0 libgtk-3-0t64 libwebkit2gtk-4.1-0 ca-certificates dbus-x11 libfuse2t64 locales && rm -rf /var/lib/apt/lists/* \
+ && localedef -i en_US -f UTF-8 en_US.UTF-8 \
  && useradd --create-home --uid 10001 orca
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 COPY --from=unpack /bundle/squashfs-root/ /opt/orca/
 COPY --from=unpack /bundle/tools/mcp/ /opt/orca-harness/
 COPY --from=unpack /bundle/LICENSE.txt /opt/orca-license/LICENSE.txt
-COPY gateway.py supervisor.py workspace.py protocol.py orca_backend.py /opt/orca-runtime/
+COPY gateway.py supervisor.py workspace.py protocol.py orca_backend.py export_store.py /opt/orca-runtime/
+COPY orca-session /opt/orca-runtime/orca-session
+RUN chmod 755 /opt/orca-runtime/orca-session && test -x /usr/bin/dbus-run-session && test -x /usr/bin/dbus-daemon && test -x /opt/orca-runtime/orca-session
+# The extracted public AppImage can contain root-only directories. Do not follow symlinks.
+RUN find -P /opt/orca -type d -exec chmod a+rx {} + \
+ && find -P /opt/orca -type f -exec chmod a+rX {} +
 USER 10001:10001
+# Check the entire public tree using the actual runtime identity.
+RUN python3 -c 'import os, stat; root="/opt/orca"; fail=lambda error: (_ for _ in ()).throw(error); [(os.access(p, os.R_OK | (os.X_OK if os.path.isdir(p) or os.lstat(p).st_mode & 0o111 else 0)) or fail(PermissionError(p))) for base, dirs, files in os.walk(root, onerror=fail, followlinks=False) for p in [base] + [os.path.join(base, n) for n in dirs + files] if not os.path.islink(p)]; assert os.access("/opt/orca/AppRun", os.X_OK) and os.access("/opt/orca/libexec/orca-slicer-env", os.X_OK)'
+RUN python3 -c 'import ctypes; ctypes.CDLL("libOpenGL.so.0")'
+RUN python3 -c 'import locale, os, subprocess; assert os.environ["LANG"] == os.environ["LC_ALL"] == "en_US.UTF-8"; assert any(x.lower().replace("_", "").replace("-", "").replace(".", "") == "enusutf8" for x in subprocess.check_output(["locale", "-a"], text=True).splitlines()); assert locale.setlocale(locale.LC_ALL, ""); assert subprocess.check_output(["locale", "charmap"], text=True).strip().upper() == "UTF-8"'
 WORKDIR /home/orca
 ENV HOME=/home/orca ORCA_MCP_SESSION=/home/orca/.cache/orca-mcp/session.json
 CMD ["python3", "/opt/orca-runtime/supervisor.py"]

@@ -104,7 +104,7 @@ test("MCP exposes workflow and successful structured blocked readiness without s
   assert.match(setupGuide.structuredContent.text, /counterpart_setup_fields/);
   assert.ok(listed.tools.find(({name}) => name === "counterpart_setup_fields")?.inputSchema);
   const resources = (await client.listResources()).resources;
-  const guides = ["index", "setup", "account", "signing", "status", "camera", "design", "slicing", "dispatch", "controls"];
+  const guides = ["index", "setup", "account", "signing", "status", "camera", "design", "slicing", "dispatch", "controls", "files"];
   const guideTexts = [];
   for (const guide of guides) {
     const uri = `bambu://workflow/${guide}`;

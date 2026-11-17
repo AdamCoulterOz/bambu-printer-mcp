@@ -9,6 +9,7 @@
 !patches/*.patch
 !scripts/
 !scripts/install-patches.mjs
+!scripts/artifact-store-lock.py
 !scripts/signing-counter.c
 !scripts/signing-setup.mjs
 !src/

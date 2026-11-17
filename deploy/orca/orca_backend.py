@@ -8,13 +8,14 @@ import secrets
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import time
 import tempfile
 from pathlib import Path
 
 class OrcaBackend:
-    def __init__(self, root, template=None, artifact_root=None, harness='/opt/orca-harness/orca_mcp.py', binary='/opt/orca/AppRun'):
+    def __init__(self, root, template=None, artifact_root=None, harness='/opt/orca-harness/orca_mcp.py', binary='/opt/orca-runtime/orca-session'):
         self.root=Path(root); self.template=Path(template) if template else None
         self.artifact_root=Path(artifact_root) if artifact_root else None
         self.harness, self.binary=harness,binary
@@ -37,7 +38,7 @@ class OrcaBackend:
                 text=(entry/'stat').read_text(); fields=text[text.rfind(')')+2:].split()
                 if fields[0]=='Z': continue
                 processes[int(entry.name)]=(fields[19],int(fields[2]))
-            except FileNotFoundError: continue  # process exited during enumeration
+            except (FileNotFoundError,ProcessLookupError): continue  # process exited during enumeration
             except (OSError,ValueError,IndexError) as exc:
                 raise RuntimeError('cannot establish process identity snapshot') from exc
         return processes
@@ -62,6 +63,35 @@ class OrcaBackend:
         return True
     def exists(self, workspace_id):
         return bool(re.fullmatch(r'[A-Za-z0-9_-]{43}', workspace_id)) and (self.root/'workspaces'/workspace_id/'profile').is_dir()
+    def attach(self, workspace_id):
+        if not isinstance(workspace_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}',workspace_id): raise ValueError('invalid workspace ID')
+        job=self.root/'workspaces'/workspace_id
+        if job.exists():
+            try:
+                if not self.exists(workspace_id): raise ValueError('workspace requires recovery')
+                fd=os.open(job/'manifest.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                with os.fdopen(fd,'rb') as manifest_file:
+                    st=os.fstat(manifest_file.fileno())
+                    if not stat.S_ISREG(st.st_mode) or st.st_size>16384: raise ValueError('workspace requires recovery')
+                    manifest=json.load(manifest_file)
+                if not isinstance(manifest,dict) or manifest.get('state') not in ('new','active','checkpointed') or type(manifest.get('recovery_required')) is not bool or 'last_checkpoint' not in manifest: raise ValueError('workspace requires recovery')
+                checkpoint=manifest['last_checkpoint']
+                if checkpoint is not None and (not isinstance(checkpoint,dict) or not isinstance(checkpoint.get('name'),str) or not re.fullmatch(r'[0-9a-f]{32}\.3mf',checkpoint['name']) or not isinstance(checkpoint.get('sha256'),str) or not re.fullmatch(r'[0-9a-f]{64}',checkpoint['sha256'])): raise ValueError('workspace requires recovery')
+                if manifest['state']=='checkpointed' and checkpoint is None: raise ValueError('workspace requires recovery')
+                if manifest['state']=='new' and checkpoint is not None: raise ValueError('workspace requires recovery')
+                if manifest['state']=='active' and not manifest['recovery_required']: raise ValueError('workspace requires recovery')
+            except (OSError,ValueError,TypeError,KeyError) as e: raise ValueError('workspace requires recovery') from e
+            return False
+        self.create(workspace_id)
+        return True
+
+    def publication_idle(self, generation):
+        if not self.current or self.current['generation']!=generation: return False
+        idle=self.call('wait',{'for':'idle','timeout_s':0})
+        state=self.call('get_app_state',{})
+        return (isinstance(idle,dict) and idle.get('satisfied') is True and isinstance(state,dict)
+                and isinstance(state.get('jobs'),list) and isinstance(state.get('dialogs'),list)
+                and not state['dialogs'] and all(isinstance(j,dict) and j.get('state') in ('done','failed') for j in state['jobs']))
     def create(self, workspace_id):
         if not re.fullmatch(r'[A-Za-z0-9_-]{43}', workspace_id): raise ValueError('invalid workspace ID')
         job=self.root/'workspaces'/workspace_id

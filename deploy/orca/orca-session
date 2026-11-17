@@ -1,0 +1,3 @@
+#!/bin/sh
+# The harness owns this session leader and its private D-Bus/GUI process group.
+exec /usr/bin/dbus-run-session -- /opt/orca/AppRun "$@"

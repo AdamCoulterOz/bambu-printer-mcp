@@ -5,6 +5,8 @@ from workspace import Workspace
 class Backend:
     def __init__(self): self.ids=set()
     def create(self,i): self.ids.add(i)
+    def attach(self,i):
+        created=i not in self.ids; self.ids.add(i); return created
     def exists(self,i): return i in self.ids
     def can_open(self,i): return i in self.ids
     def describe(self,i): return {'recovery_required':False,'has_checkpoint':False}
@@ -34,4 +36,12 @@ class Tests(unittest.TestCase):
         self.assertTrue(self.call('tools/call',{'name':'slice','arguments':{'workspace_id':lease}})[1]['result']['isError'])
     def test_instructions_teach_workflow(self):
         self.assertTrue(self.call('initialize')[1]['result']['instructions'].startswith('Call workspace_create'))
+    def test_shared_id_attach_and_control_catalog_in_both_protocols(self):
+        wid='a'*43
+        for i in range(2):
+            result=self.call('tools/call',{'name':'workspace_attach','arguments':{'workspace_id':wid}})[1]['result']
+            body=json.loads(result['content'][0]['text']); self.assertEqual(body['workspace_id'],wid); self.assertEqual(body['created'],i==0)
+        for params in ({},{'_meta':{'io.modelcontextprotocol/protocolVersion':'2026-07-28'}}):
+            names={tool['name'] for tool in self.call('tools/list',params)[1]['result']['tools']}
+            self.assertTrue({'workspace_attach','workspace_publish_file','workspace_export_delete'}<=names)
 if __name__=='__main__': unittest.main()

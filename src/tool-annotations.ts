@@ -34,6 +34,19 @@ const START_PRINT = hints(false, false, false, true);
 const SLICE_AND_PRINT = hints(false, true, false, true);
 
 export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
+  workspace_status: READ_LOCAL,
+  workspace_artifact_info: READ_LOCAL,
+  workspace_artifact_read: READ_LOCAL,
+  workspace_create: hints(false, false, false, false),
+  workspace_attach: hints(false, false, true, false),
+  workspace_import_file: hints(false, false, false, true),
+  workspace_upload_begin: hints(false, false, false, false),
+  workspace_upload_chunk: hints(false, false, false, false),
+  workspace_upload_finish: hints(false, false, false, false),
+  workspace_upload_abort: hints(false, true, false, false),
+  workspace_delete: hints(false, true, false, false),
+  workspace_artifact_delete: hints(false, true, false, false),
+  workspace_adopt_export: hints(false, false, false, false),
   cad_status: READ_LOCAL,
   cad_setup: hints(false, true, true, true),
   cad_run: hints(false, false, false, false),

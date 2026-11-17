@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { workspaceArtifactTools, handleWorkspaceArtifactTool, WorkspaceArtifactError } from "./workspace-artifacts.js";
 import {physicalProblems} from "./counterpart/visual-evidence.js";
 import {flightKey} from "./counterpart/flight-record.js";
 import {FLIGHT_RECORD_PROPERTIES,FLIGHT_RECORD_DESCRIPTION,FLIGHT_RECORD_OUTPUT_SCHEMA,flightReadOptions,flightRecordResult,FLIGHT_ASSESS_PROPERTIES,FLIGHT_ASSESS_REQUIRED,FLIGHT_ASSESS_DESCRIPTION,PRINT_EVIDENCE_GUIDANCE,visualSubmission} from "./counterpart/flight-tools.js";
@@ -2683,6 +2684,7 @@ export class BambuPrinterMCPServer {
         tools: [
           AGENT_READINESS_TOOL,
           AGENT_GUIDE_TOOL,
+          ...workspaceArtifactTools,
           { name: "account_status", description: "Report whether a private cached Bambu account session exists; ready does not mean it was validated online.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
           { name: "account_login", description: "Start a short-lived local browser login; credentials and verification codes are entered only in that browser.", inputSchema: { type: "object", properties: { region: { type: "string", enum: ["global", "china"], description: "The Bambu account region." } }, required: ["region"], additionalProperties: false } },
           { name: "account_cancel_login", description: "Cancel the pending local browser login.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
@@ -3927,6 +3929,17 @@ export class BambuPrinterMCPServer {
     server.setRequestHandler(CallToolRequestSchema, (request, extra) => withRequestOwner(server, extra, () => withPrintDispatch(() => withExtractedSettingsCleanup(async () => {
       extra.signal.throwIfAborted();
       const { name, arguments: args } = request.params;
+      if (workspaceArtifactTools.some(tool => tool.name === name)) {
+        try {
+          const result = await handleWorkspaceArtifactTool(name, args ?? {}, { signal: extra.signal });
+          return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result };
+        } catch (error) {
+          const failure = error instanceof WorkspaceArtifactError
+            ? { code: error.code, message: error.message, next_action: error.next_action }
+            : { code: "WORKSPACE_OPERATION_FAILED", message: "Workspace operation failed.", next_action: "Check workspace status before retrying." };
+          return { isError: true, content: [{ type: "text" as const, text: failure.message }], structuredContent: failure };
+        }
+      }
       const sendNativeCommand = (
         options: Parameters<typeof sendCommandWithBambuNative>[0],
         execution: Parameters<typeof sendCommandWithBambuNative>[1] = {}

@@ -35,6 +35,7 @@
     "src",
     "patches",
     "scripts/install-patches.mjs",
+    "scripts/artifact-store-lock.py",
     "README.md",
     "CONTRIBUTORS.md",
     "LICENSE",

@@ -7,21 +7,54 @@ import time
 class WorkspaceError(Exception): pass
 
 class Workspace:
-    def __init__(self, backend, idle_seconds=900, hard_seconds=14400, clock=time.monotonic):
+    def __init__(self, backend, idle_seconds=900, hard_seconds=14400, clock=time.monotonic, export_store=None):
         if not 1 <= idle_seconds <= hard_seconds <= 86400: raise ValueError('invalid workspace deadlines')
         self.backend, self.idle_seconds, self.hard_seconds, self.clock = backend, idle_seconds, hard_seconds, clock
-        self.lock=threading.RLock(); self.state='idle'; self.generation=0; self.workspace_id=None; self.active=0; self.shutting_down=False
+        self.export_store=export_store
+        self.lock=threading.RLock(); self.state='idle'; self.generation=0; self.workspace_id=None; self.active=0; self.shutting_down=False; self.storage_active=0
     def create(self):
         with self.lock:
             if self.shutting_down: raise WorkspaceError('server shutting down')
             workspace_id=secrets.token_urlsafe(32)
             self.backend.create(workspace_id)
             return {'workspace_id':workspace_id,'worker_busy':self.state!='idle'}
+    def attach(self, workspace_id):
+        with self.lock:
+            if self.shutting_down: raise WorkspaceError('server shutting down')
+            try: created=self.backend.attach(workspace_id)
+            except ValueError as e: raise WorkspaceError(str(e)) from e
+            return {'workspace_id':workspace_id,'created':created,'worker_busy':self.state!='idle'}
+    def publish_file(self, workspace_id, relative_path):
+        with self.lock:
+            if self.shutting_down or self.state!='active' or self.clock()>=min(self.idle,self.hard): raise WorkspaceError('workspace unavailable or expired')
+            if not isinstance(workspace_id,str) or not secrets.compare_digest(workspace_id,self.workspace_id): raise WorkspaceError('invalid workspace ID')
+            if self.active: raise WorkspaceError('workspace has in-flight calls')
+            if self.export_store is None: raise WorkspaceError('export sharing is not configured')
+            gen=self.generation; self.state='publishing'
+        try:
+            if not self.backend.publication_idle(gen): raise WorkspaceError('workspace has jobs or dialogs')
+            def commit(action):
+                with self.lock:
+                    if self.shutting_down or self.state!='publishing' or self.generation!=gen or self.clock()>=min(self.idle,self.hard): raise WorkspaceError('workspace expired or revoked during publication')
+                    action()
+            return self.export_store.publish(workspace_id,relative_path,commit)
+        finally:
+            with self.lock:
+                if self.generation==gen and self.state=='publishing': self.state='active'
+    def export_delete(self, workspace_id, export_id, sha256):
+        with self.lock:
+            if self.shutting_down: raise WorkspaceError('server shutting down')
+            if not isinstance(workspace_id,str) or not self.backend.exists(workspace_id): raise WorkspaceError('unknown workspace; use workspace_attach for a common ID')
+            if self.export_store is None: raise WorkspaceError('export sharing is not configured')
+            self.storage_active+=1
+        try: return self.export_store.delete(workspace_id,export_id,sha256)
+        finally:
+            with self.lock: self.storage_active-=1
     def open(self, workspace_id):
         with self.lock:
             if self.shutting_down: raise WorkspaceError('server shutting down')
             if self.state!='idle': raise WorkspaceError('worker busy')
-            if not isinstance(workspace_id,str) or not self.backend.exists(workspace_id): raise WorkspaceError('unknown workspace')
+            if not isinstance(workspace_id,str) or not self.backend.exists(workspace_id): raise WorkspaceError('unknown workspace; use workspace_attach for a common ID')
             if not self.backend.can_open(workspace_id): raise WorkspaceError('workspace requires recovery; verified checkpoint unavailable')
             self.state='starting'; self.generation+=1; gen=self.generation; self.workspace_id=workspace_id
         try: self.backend.start(gen,secrets.token_hex(32),workspace_id)
@@ -37,7 +70,7 @@ class Workspace:
             return {'workspace_id':workspace_id,'idle_expires_in':self.idle_seconds,'hard_expires_in':self.hard_seconds}
     def status(self, workspace_id=None):
         with self.lock:
-            if workspace_id is not None and (not isinstance(workspace_id,str) or not self.backend.exists(workspace_id)): raise WorkspaceError('unknown workspace')
+            if workspace_id is not None and (not isinstance(workspace_id,str) or not self.backend.exists(workspace_id)): raise WorkspaceError('unknown workspace; use workspace_attach for a common ID')
             if self.state=='active':
                 result={'busy':True,'expires_in':max(0,min(self.idle,self.hard)-self.clock())}
                 if workspace_id is not None:
@@ -101,8 +134,10 @@ class Workspace:
         with self.lock: self.shutting_down=True
         while True:
             with self.lock:
-                state=self.state; workspace_id=self.workspace_id
-            if state=='idle': return True
+                state=self.state; workspace_id=self.workspace_id; storage_active=self.storage_active
+            if state=='idle':
+                if not storage_active: return True
+                time.sleep(.05)
             if state=='active':
                 try: self.close(workspace_id)
                 except WorkspaceError: pass

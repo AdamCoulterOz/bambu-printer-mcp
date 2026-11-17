@@ -1,5 +1,18 @@
 export const REMOTE_META_KEY = "counterpart/remote";
 export const REMOTE_SCOPES = {
+    workspace_status: "read",
+    workspace_artifact_info: "read",
+    workspace_artifact_read: "read",
+    workspace_create: "design",
+    workspace_attach: "design",
+    workspace_import_file: "design",
+    workspace_upload_begin: "design",
+    workspace_upload_chunk: "design",
+    workspace_upload_finish: "design",
+    workspace_adopt_export: "design",
+    workspace_upload_abort: "control",
+    workspace_delete: "control",
+    workspace_artifact_delete: "control",
     // read
     get_agent_readiness: "read",
     get_agent_guide: "read",
