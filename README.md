@@ -328,7 +328,7 @@ The first MQTT status push from an idle printer is often sparse (model/module in
 
 ### Checking AMS status
 
-Use `get_printer_filaments` for the parsed, enriched view (profile paths, display names, match confidence) or `get_printer_status` for the raw AMS data from the printer:
+Use `get_printer_filaments` for the parsed, enriched view (profile paths, display names, match confidence) or `get_printer_status` with `detail: "full"` for the raw AMS data from the printer:
 
 ```
 "What filaments are loaded in my AMS right now?"
@@ -583,7 +583,7 @@ The server also accepts the alias variables `BAMBU_PRINTER_HOST`, `BAMBU_PRINTER
 
 #### get_printer_status
 
-Retrieve current printer state including temperatures, print progress, layer count, time remaining, and AMS slot data. Internally sends a `push_all` MQTT command to force a fresh status report before reading cached state.
+Retrieve current printer state including temperatures, print progress, layer count, time remaining, and AMS slot data. The default compact response is a single JSON text block; it is display data and may be cached or incomplete. Set `fresh: true` for verified fresh identity telemetry; this is not a complete print safety check. Set `detail: "full"` for the legacy full response.
 
 ```json
 {
@@ -595,7 +595,7 @@ Retrieve current printer state including temperatures, print progress, layer cou
 
 Chamber status decodes the current temperature from newer firmware's packed CTC reports, including P2S, while retaining legacy chamber/frame fields.
 
-Returns a structured object with fields including `status` (gcode_state string), `temperatures.nozzle`, `temperatures.bed`, `temperatures.chamber`, `print.progress`, `print.currentLayer`, `print.totalLayers`, `print.timeRemaining`, and `ams` (raw AMS data from the printer).
+With `detail: "full"`, returns the legacy object with fields including `status` (gcode_state string), `temperatures.nozzle`, `temperatures.bed`, `temperatures.chamber`, `print.progress`, `print.currentLayer`, `print.totalLayers`, `print.timeRemaining`, and `ams` (raw AMS data from the printer).
 
 #### get_printer_filaments
 
@@ -1575,7 +1575,7 @@ Resources follow the MCP resource protocol and can be read by calling `ReadResou
 
 ### Printer resources
 
-- `printer://{host}/status` -- Current printer status. Equivalent to calling `get_printer_status`. Returns a JSON object with temperature, progress, layer, AMS, and raw state data.
+- `printer://{host}/status` -- Current printer status. Returns the full display status with temperature, progress, layer, AMS, and raw state data; equivalent to `get_printer_status` with `detail: "full"`.
 
 - `printer://{host}/files` -- File listing for the printer's SD card. Equivalent to calling `list_printer_files`. Returns files grouped by directory.
 

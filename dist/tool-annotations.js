@@ -12,6 +12,19 @@ const START_PRINT = hints(false, false, false, true);
 /** Starts a print, auto-slicing an unsliced project first, which replaces an earlier slice output of that name. */
 const SLICE_AND_PRINT = hints(false, true, false, true);
 export const TOOL_ANNOTATIONS = {
+    workspace_status: READ_LOCAL,
+    workspace_artifact_info: READ_LOCAL,
+    workspace_artifact_read: READ_LOCAL,
+    workspace_create: hints(false, false, false, false),
+    workspace_attach: hints(false, false, true, false),
+    workspace_import_file: hints(false, false, false, true),
+    workspace_upload_begin: hints(false, false, false, false),
+    workspace_upload_chunk: hints(false, false, false, false),
+    workspace_upload_finish: hints(false, false, false, false),
+    workspace_upload_abort: hints(false, true, false, false),
+    workspace_delete: hints(false, true, false, false),
+    workspace_artifact_delete: hints(false, true, false, false),
+    workspace_adopt_export: hints(false, false, false, false),
     cad_status: READ_LOCAL,
     cad_setup: hints(false, true, true, true),
     cad_run: hints(false, false, false, false),
@@ -21,6 +34,14 @@ export const TOOL_ANNOTATIONS = {
     // Printer and cloud reads
     get_printer_status: READ_OUTSIDE,
     get_printer_filaments: READ_OUTSIDE,
+    get_filament_inventory: READ_OUTSIDE,
+    account_list_filament_inventory: READ_OUTSIDE,
+    account_cloud_print_history: READ_OUTSIDE,
+    account_cloud_print_thumbnail: READ_OUTSIDE,
+    account_reprint_cloud_task: START_PRINT,
+    account_reprint_hold: hints(false, true, false, true),
+    account_setup_signing: hints(false, false, false, true),
+    account_filament_manager: hints(false, true, false, true),
     resolve_3mf_ams_slots: READ_OUTSIDE, // reads the live AMS inventory
     list_printer_files: READ_OUTSIDE,
     counterpart_print_progress: READ_OUTSIDE,
@@ -31,6 +52,13 @@ export const TOOL_ANNOTATIONS = {
     // connect: true starts the bridge agent, which writes its configuration and device identity and can replace certificates.
     bambu_network_bridge_status: hints(false, true, true, true),
     camera_frame: READ_OUTSIDE,
+    remote_camera_snapshot: hints(false, false, false, true),
+    remote_list_files: hints(false, false, false, true),
+    remote_download_file: hints(false, false, false, true),
+    remote_upload_file: hints(false, true, false, true),
+    remote_delete_file: hints(false, true, false, true),
+    remote_archive_members: hints(false, false, false, true),
+    remote_archive_extract: hints(false, false, false, true),
     // Open (or renew) and close the one camera connection all viewers of this printer share; no printer motion or commands.
     camera_stream_start: hints(false, false, true, true),
     camera_stream_stop: hints(false, false, true, true),

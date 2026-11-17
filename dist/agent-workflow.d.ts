@@ -28,14 +28,14 @@ type SigningSetupField = {
     }>;
 };
 /** Tool and resources share exactly the same guide text. */
-export declare const AGENT_GUIDE_TOPICS: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing"];
+export declare const AGENT_GUIDE_TOPICS: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing", "files"];
 export type AgentGuideTopic = typeof AGENT_GUIDE_TOPICS[number];
 export declare function getAgentGuide(topic?: unknown): {
     configuration_fields?: SigningSetupField[] | undefined;
     topic: string;
     uri: string;
     text: string;
-    available_topics: ("index" | "setup" | "signing" | "account" | "status" | "camera" | "design" | "slicing" | "dispatch" | "controls" | "printing")[];
+    available_topics: ("index" | "files" | "setup" | "signing" | "account" | "status" | "camera" | "design" | "slicing" | "dispatch" | "controls" | "printing")[];
 };
 export declare const AGENT_GUIDE_TOOL: {
     readonly name: "get_agent_guide";
@@ -45,7 +45,7 @@ export declare const AGENT_GUIDE_TOOL: {
         readonly properties: {
             readonly topic: {
                 readonly type: "string";
-                readonly enum: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing"];
+                readonly enum: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing", "files"];
                 readonly description: "Guide topic; defaults to index.";
             };
         };
@@ -56,7 +56,7 @@ export declare const AGENT_GUIDE_TOOL: {
         readonly properties: {
             readonly topic: {
                 readonly type: "string";
-                readonly enum: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing"];
+                readonly enum: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing", "files"];
             };
             readonly uri: {
                 readonly type: "string";
@@ -110,7 +110,7 @@ export declare const AGENT_GUIDE_TOOL: {
                 readonly type: "array";
                 readonly items: {
                     readonly type: "string";
-                    readonly enum: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing"];
+                    readonly enum: readonly ["index", "setup", "status", "camera", "design", "slicing", "dispatch", "controls", "account", "signing", "printing", "files"];
                 };
             };
         };

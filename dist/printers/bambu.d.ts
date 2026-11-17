@@ -123,6 +123,13 @@ export declare class BambuImplementation {
      * is detected before dispatch.
      */
     confirmPrintPreflight(serial: string, status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>): Promise<PrintPreflight>;
+    /** Confirmation for provider metadata only: no original G-code bytes were inspected. */
+    confirmCompletedJobReferencePreflight(serial: string, status: any, reference: {
+        sourceTaskId: string;
+        model: string;
+        nozzles: number[];
+        materials: string[];
+    }): Promise<PrintPreflight>;
     /** Stop a print whose confirmed situation changed: a newly finished job, or a hidden HMS notice the preflight did not name. */
     assertPrintPreflight(status: any, preflight: PrintPreflight): void;
     private getPrinter;
@@ -289,7 +296,7 @@ export declare class BambuImplementation {
         idleTimeoutMs?: number;
         ffmpegPath?: string;
     }): {
-        status: "started" | "running";
+        status: "running" | "started";
         transport: import("./camera-stream.js").CameraTransport;
         fps: number;
         startedAt: string;

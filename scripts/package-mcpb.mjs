@@ -96,6 +96,7 @@ export function packageMcpb({ root = ROOT, outputPath = path.join(root, "bambu-p
     }
     fs.mkdirSync(path.join(staging, "scripts"));
     copyReleaseInput(path.join(root, "scripts/install-patches.mjs"), path.join(staging, "scripts/install-patches.mjs"));
+    copyReleaseInput(path.join(root, "scripts/artifact-store-lock.py"), path.join(staging, "scripts/artifact-store-lock.py"));
     fs.mkdirSync(path.join(staging, "native"));
     copyReleaseInput(path.join(root, "native/bambu-native-print.cpp"), path.join(staging, "native/bambu-native-print.cpp"));
     copyReleaseInput(path.join(root, "scripts/build-bambu-native.sh"), path.join(staging, "scripts/build-bambu-native.sh"));

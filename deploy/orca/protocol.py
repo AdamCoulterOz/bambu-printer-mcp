@@ -3,13 +3,16 @@ import copy
 import json
 from workspace import WorkspaceError
 
-INSTRUCTIONS = ('Call workspace_create, then workspace_open with its workspace_id. Pass that ID to every Orca tool call. '
+INSTRUCTIONS = ('Call workspace_create, or workspace_attach with the common ID from the printer service, then workspace_open. Pass that ID to every Orca tool call. '
                 'Wait for jobs and export before workspace_close. Use workspace_open with the same ID after a verified checkpoint; recovery is required after an unclean stop. Unfinished outcomes are unknown.')
 CONTROL = [
  {'name':'workspace_create','description':'Create a durable cold workspace and return its ID.', 'inputSchema':{'type':'object','properties':{},'additionalProperties':False}},
+ {'name':'workspace_attach','description':'Cold attach an existing common workspace ID, idempotently.', 'inputSchema':{'type':'object','properties':{'workspace_id':{'type':'string'}},'required':['workspace_id'],'additionalProperties':False}},
  {'name':'workspace_open','description':'Open a workspace from its verified checkpoint; unclean workspaces require recovery.', 'inputSchema':{'type':'object','properties':{'workspace_id':{'type':'string'}},'required':['workspace_id'],'additionalProperties':False}},
  {'name':'workspace_status','description':'Read worker state; optionally check a workspace ID.', 'inputSchema':{'type':'object','properties':{'workspace_id':{'type':'string'}},'additionalProperties':False}},
  {'name':'workspace_close','description':'End the owned workspace; unfinished outcomes may be unknown.', 'inputSchema':{'type':'object','properties':{'workspace_id':{'type':'string'}},'required':['workspace_id'],'additionalProperties':False}},
+ {'name':'workspace_publish_file','description':'Copy a finished workspace artifact to the shared outbox.', 'inputSchema':{'type':'object','properties':{'workspace_id':{'type':'string'},'relative_path':{'type':'string'}},'required':['workspace_id','relative_path'],'additionalProperties':False}},
+ {'name':'workspace_export_delete','description':'Delete a published outbox copy after verifying its hash.', 'inputSchema':{'type':'object','properties':{'workspace_id':{'type':'string'},'export_id':{'type':'string'},'sha256':{'type':'string'}},'required':['workspace_id','export_id','sha256'],'additionalProperties':False}},
 ]
 class Router:
     def __init__(self, workspace, cache, forward): self.workspace,self.cache,self.forward=workspace,cache,forward
@@ -49,9 +52,12 @@ class Router:
         if not isinstance(name,str) or not isinstance(args,dict): return 400,b''
         try:
             if name=='workspace_create': result=self.workspace.create()
+            elif name=='workspace_attach': result=self.workspace.attach(args.get('workspace_id'))
             elif name=='workspace_open': result=self.workspace.open(args.get('workspace_id'))
             elif name=='workspace_status': result=self.workspace.status(args.get('workspace_id'))
             elif name=='workspace_close': result=self.workspace.close(args.get('workspace_id'))
+            elif name=='workspace_publish_file': result=self.workspace.publish_file(args.get('workspace_id'),args.get('relative_path'))
+            elif name=='workspace_export_delete': result=self.workspace.export_delete(args.get('workspace_id'),args.get('export_id'),args.get('sha256'))
             else:
                 workspace_id=args.get('workspace_id'); generation=self.workspace.authorize(workspace_id)
                 try:

@@ -28,7 +28,7 @@ test('one-shot login persists privately and returns only sanitized binding and s
     if (path.endsWith('/bind')) return {devices:[{dev_id:'SERIAL1',name:'Printer',dev_product_name:'X2D',dev_access_code:'SECRET-CODE'}]};
     return {uid:12345};
   });
-  assert.deepEqual(await manager.status(), {state:'not_configured',loginInProgress:false});
+  assert.deepEqual(await manager.status(), {state:'not_configured',loginInProgress:false,refreshState:'unavailable'});
   const flow = await manager.beginInteractiveLogin({region:'global'});
   const page = await fetch(flow.url); assert.equal(page.status,200); assert.match(await page.text(), /Bambu account sign in/);
   const result = await post(flow.url,{action:'login',account:'dummy',password:'PASSWORD-PRIVATE'});
@@ -46,6 +46,33 @@ test('one-shot login persists privately and returns only sanitized binding and s
   assert.equal(JSON.stringify(await manager.listPrinters()).includes('SECRET-CODE'),false);
   assert.equal(calls[0].body.password,'PASSWORD-PRIVATE');
   await manager.logout(); assert.equal((await manager.status()).state,'not_configured');
+});
+
+test('login stores a returned refresh credential privately and records account identity', async t => {
+  const {directory,manager} = await fixture(t, async (_region,path) => {
+    if (path.endsWith('/login')) return {...good,refreshToken:'refresh-private',refreshExpiresIn:7200};
+    if (path.endsWith('/preference')) return {uid:12345};
+    return {devices:[]};
+  });
+  const flow=await manager.beginInteractiveLogin({region:'global'});
+  const response=await post(flow.url,{action:'login',account:'dummy',password:'PASSWORD-PRIVATE'});
+  assert.deepEqual(await response.json(),{state:'complete'});
+  const saved=JSON.parse(await readFile(join(directory,'session.json'),'utf8'));
+  assert.equal(saved.refreshToken,'refresh-private');assert.equal(saved.identity,'u_12345');
+  assert.equal((await manager.status()).refreshState,'available');
+  assert.equal(JSON.stringify(await manager.status()).includes('refresh-private'),false);
+});
+
+test('opaque login requires a usable authenticated preference UID before persisting', async t => {
+  const {directory,manager} = await fixture(t, async (_region,path,_body,secret) => {
+    if (path.endsWith('/login')) return {accessToken:'opaque-access',refreshToken:'opaque-refresh',expiresIn:3600};
+    if (path.endsWith('/preference')) { assert.equal(secret,'opaque-access'); return {}; }
+    throw new Error('unexpected request');
+  });
+  const flow=await manager.beginInteractiveLogin({region:'global'});
+  const response=await post(flow.url,{action:'login',account:'dummy',password:'dummy'});
+  assert.equal((await response.json()).state,'error');
+  await assert.rejects(readFile(join(directory,'session.json')), {code:'ENOENT'});
 });
 
 test('challenge, wrong code, and TOTP are handled without returning challenge secrets', async t => {
@@ -237,16 +264,17 @@ test('async guard detects another manager replacing or removing the shared sessi
 
 test('delayed listener startup is rejected and closed after cancellation, without harming the replacement', async t => {
   const original=Server.prototype.listen;
-  let resume, delayedServer;
+  let resume, delayedServer, notify;
+  const entered=new Promise(resolve=>{notify=resolve;});
   Server.prototype.listen=function(...args) {
-    if (!resume) { delayedServer=this; resume=()=>original.apply(this,args); return this; }
+    if (!resume) { delayedServer=this; resume=()=>original.apply(this,args); notify(); return this; }
     return original.apply(this,args);
   };
   t.after(()=>{Server.prototype.listen=original;});
   const {manager}=await fixture(t,async()=>good);
   const old=manager.beginInteractiveLogin({region:'global'});
   const rejected=assert.rejects(old,/cancelled/);
-  assert.ok(resume);
+  await entered;assert.ok(resume);
   manager.cancelInteractiveLogin();
   const replacement=await manager.beginInteractiveLogin({region:'global'});
   resume(); await rejected;
@@ -268,4 +296,65 @@ test('logout waits for an in-flight atomic session rename and leaves no token', 
   const logout=manager.logout();
   release(); await logout; await request;
   assert.equal((await manager.status()).state,'not_configured');
+});
+
+test('cancelling the first login after session rename fsyncs its rollback', async t => {
+  const {manager,directory}=await fixture(t,async()=>good);
+  const flow=await manager.beginInteractiveLogin({region:'global'});
+  const rename=fsPromises.rename, open=fsPromises.open, unlink=fsPromises.unlink;
+  let release,reached,removed=false,rollbackSynced=false;
+  const entered=new Promise(r=>{reached=r;}),wait=new Promise(r=>{release=r;});
+  fsPromises.rename=async (...args)=>{const result=await rename(...args);if(args[1]===join(directory,'session.json')) {reached();await wait;}return result;};
+  fsPromises.unlink=async (...args)=>{const result=await unlink(...args);if(args[0]===join(directory,'session.json'))removed=true;return result;};
+  fsPromises.open=async (...args)=>{const handle=await open(...args);if(args[0]===directory){const sync=handle.sync.bind(handle);handle.sync=async()=>{if(removed)rollbackSynced=true;return sync();};}return handle;};
+  t.after(()=>{fsPromises.rename=rename;fsPromises.open=open;fsPromises.unlink=unlink;});
+  const request=post(flow.url,{action:'login',account:'dummy',password:'dummy'}).catch(()=>{});
+  await entered;manager.cancelInteractiveLogin();release();await request;
+  for(let i=0;i<50&&!rollbackSynced;i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(removed,true);assert.equal(rollbackSynced,true);assert.equal((await manager.status()).state,'not_configured');
+});
+
+test('filament inventory uses private account session and excludes credentials from output', async t => {
+  const calls = [];
+  const {directory, manager} = await fixture(t, async (region, path, body, secret, signal) => {
+    calls.push({region, path, body, secret, signal});
+    return {total: 1, hits: [{id: 123, filamentId:'GFA00', netWeight: null, totalNetWeight: 1000, ignored: token}]};
+  });
+  await fsPromises.mkdir(directory, {recursive:true, mode:0o700});
+  await writeFile(join(directory, 'session.json'), JSON.stringify({version:1,region:'global',token,expiresAt:null}), {mode:0o600});
+  const result = await manager.listFilamentInventory({});
+  assert.equal(calls.length, 1); assert.equal(calls[0].secret, token); assert.equal(calls[0].body, undefined);
+  assert.match(calls[0].path, /my\/filament\/v2\?offset=0&limit=20$/);
+  assert.equal(result.spools[0].net_weight_g, null); assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC-TOKEN-PRIVATE/);
+  await manager.logout();
+  await assert.rejects(manager.listFilamentInventory({}), /session missing or expired/);
+});
+
+
+test('inventory uses complete explicit cloud credentials before cached session and rejects partial credentials', async t => {
+  const calls = [];
+  const {manager} = await fixture(t, async (region,path,body,secret) => { calls.push({region,path,body,secret}); return {total:0,hits:[]}; });
+  const env = {BAMBU_SIGNED_CLOUD_BROKER:'mqtts://us.mqtt.bambulab.com:8883', BAMBU_SIGNED_CLOUD_USERNAME:'u_123', BAMBU_SIGNED_CLOUD_TOKEN:token};
+  assert.equal((await manager.listFilamentInventory(env)).retrieval_complete, true);
+  assert.equal(calls[0].region, 'global'); assert.equal(calls[0].secret, token);
+  await assert.rejects(manager.listFilamentInventory({...env, BAMBU_SIGNED_CLOUD_USERNAME:''}), /incomplete/);
+  await assert.rejects(manager.listFilamentInventory({...env, BAMBU_SIGNED_CLOUD_BROKER:'mqtts://unknown.invalid'}), /region/);
+  assert.equal(calls.length, 1);
+});
+
+test('logout aborts an in-flight inventory page and prevents further pages', async t => {
+  let release, entered;
+  const started = new Promise(r => {entered = r});
+  let count = 0, pageSignal;
+  const {directory, manager} = await fixture(t, async (_region,_path,_body,_token,signal) => {
+    count++; pageSignal=signal; entered();
+    return new Promise(r => {release = r});
+  });
+  await writeFile(join(directory, 'session.json'), JSON.stringify({version:1,region:'global',token,expiresAt:null}), {mode:0o600});
+  const pending = manager.listFilamentInventory({});
+  await started; const rejected = assert.rejects(pending, /authority changed/);
+  await manager.logout(); await rejected;
+  assert.equal(pageSignal.aborted, true);
+  release({total:21,hits:Array.from({length:20}, (_,i) => ({id:i}))});
+  await new Promise(r => setTimeout(r, 10)); assert.equal(count,1);
 });

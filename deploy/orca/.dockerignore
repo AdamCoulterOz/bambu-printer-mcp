@@ -6,6 +6,8 @@
 !workspace.py
 !protocol.py
 !orca_backend.py
+!orca-session
+!export_store.py
 !bundle/
 !bundle/**
 !verify_bundle.py

@@ -1,0 +1,104 @@
+{
+  "schema": "tutk-wire-fixtures/1",
+  "provenance": "synthetic bytes, no capture or printer identity",
+  "source_revision": "77de55a8c696c53125ca297bdf3fdf1258772335",
+  "vectors": [
+    {
+      "name": "framed_camera_start_channel_0",
+      "input": {
+        "io_type": 511,
+        "data_hex": "0000000000000000",
+        "request_index": 0,
+        "packet_sequence": 1
+      },
+      "packet_hex": "0c000b0001000000000000000000000000700000010000000c0000000000000000000000ff0100000000000000000000"
+    },
+    {
+      "name": "framed_camera_stop_channel_0",
+      "input": {
+        "io_type": 767,
+        "data_hex": "0000000000000000",
+        "request_index": 0,
+        "packet_sequence": 1
+      },
+      "packet_hex": "0c000b0001000000000000000000000000700000010000000c0000000000000000000000ff0200000000000000000000"
+    },
+    {
+      "name": "framed_list_model_internal",
+      "input": {
+        "json_utf8": "{\"cmdtype\":1,\"sequence\":7,\"req\":{\"type\":\"model\",\"api_version\":2,\"notify\":\"DETAIL\",\"storage\":\"internal\"}}",
+        "io_type": 12289,
+        "request_index": 0,
+        "packet_sequence": 1
+      },
+      "packet_hex": "0c000b0001000000000000000000000000700000010000006c0000000000000000000000013000007b22636d6474797065223a312c2273657175656e6365223a372c22726571223a7b2274797065223a226d6f64656c222c226170695f76657273696f6e223a322c226e6f74696679223a2244455441494c222c2273746f72616765223a22696e7465726e616c227d7d"
+    },
+    {
+      "name": "framed_file_download",
+      "input": {
+        "json_utf8": "{\"cmdtype\":4,\"sequence\":8,\"req\":{\"path\":\"/synthetic/sample.3mf\",\"offset\":0}}",
+        "io_type": 12289,
+        "request_index": 0,
+        "packet_sequence": 1
+      },
+      "packet_hex": "0c000b000100000000000000000000000070000001000000500000000000000000000000013000007b22636d6474797065223a342c2273657175656e6365223a382c22726571223a7b2270617468223a222f73796e7468657469632f73616d706c652e336d66222c226f6666736574223a307d7d"
+    },
+    {
+      "name": "framed_ctrl_reply_two_slices",
+      "input": {
+        "expected_utf8": "{\"cmdtype\":1,\"mtype\":12289,\"sequence\":7,\"result\":0,\"reply\":{\"file_lists\":[]}}",
+        "frame_number": 12,
+        "trailer_length": 16
+      },
+      "slice_hex": [
+        "0500000002000000200000000c0000000d0000007b22636d6474797065223a312c226d74797065223a31323238392c2273657175",
+        "05010100020010003d0000000c0000000d000000656e6365223a372c22726573756c74223a302c227265706c79223a7b2266696c655f6c69737473223a5b5d7d7d4e0001000000000000000000d2040000"
+      ],
+      "packet_hex": [
+        "0c000b000700000009000002000000000500000002000000200000000c0000000d0000007b22636d6474797065223a312c226d74797065223a31323238392c2273657175",
+        "0c000b0008000000090001020000000005010100020010003d0000000c0000000d000000656e6365223a372c22726573756c74223a302c227265706c79223a7b2266696c655f6c69737473223a5b5d7d7d4e0001000000000000000000d2040000"
+      ]
+    },
+    {
+      "name": "download_terminal_with_binary",
+      "frame_hex": "7b22636d6474797065223a342c226d74797065223a31323238392c2273657175656e6365223a382c22726573756c74223a302c227265706c79223a7b226f6666736574223a302c2273697a65223a332c22746f74616c223a332c2266696c655f6d6435223a223930303135303938336364323466623064363936336637643238653137663732227d7d0a0a616263",
+      "binary_hex": "616263",
+      "md5": "900150983cd24fb0d6963f7d28e17f72",
+      "result": 0,
+      "sequence": 8
+    },
+    {
+      "name": "unsolicited_notification",
+      "frame_utf8": "{\"cmdtype\":4294967295,\"sequence\":4294967295,\"result\":2}"
+    },
+    {
+      "name": "fec_k2_parity_row2",
+      "polynomial_hex": "011d",
+      "data_hex": [
+        "01020304",
+        "05060708"
+      ],
+      "row": [
+        3,
+        2
+      ],
+      "parity_hex": "090a0b1c"
+    },
+    {
+      "name": "probe_ack",
+      "packet_hex": "0b000b0000001f00341202000200000000000000",
+      "echo_ms16": 4660,
+      "received_since_ack": 2
+    },
+    {
+      "name": "invalid_slice_zero_count",
+      "slice_hex": "0500000000000000000000000100000002000000",
+      "reject": "zero slice count"
+    },
+    {
+      "name": "invalid_slice_truncated",
+      "slice_hex": "05000000010000000300000001000000020000007879",
+      "reject": "declared slice length exceeds bytes"
+    }
+  ]
+}

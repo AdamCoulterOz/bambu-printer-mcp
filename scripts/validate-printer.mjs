@@ -273,6 +273,7 @@ try {
     const resp = await send("tools/call", {
       name: "get_printer_status",
       arguments: {
+        detail: "full",
         host,
         bambu_serial: serial,
         bambu_token: token,

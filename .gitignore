@@ -53,3 +53,6 @@ native/*.dSYM/
 !/docs/prd/scan-to-print-PRD.md
 
 !/docs/CAD.md
+!/docs/signing-provisioning.md
+!/docs/TUTK.md
+!/docs/protocol/tutk-wire.md

@@ -2,13 +2,33 @@
 
 ## Unreleased
 
+- Add optional shared workspace file staging and verified Orca export adoption, with bounded transfers and existing print safety gates preserved. The current Node suite passes 1,604 tests with 29 skips, and the installed npm and MCPB packages pass isolated workspace checks. The Orca fixture passes 56 Linux tests; an isolated shared-mount slice and hash-matched adoption passed without dispatch. The managed services are deployed; an actual user-client attachment handoff remains unverified.
+
+### Changed
+
+- Default `get_printer_status` to compact; clients needing the previous raw and structured response must request `detail: "full"`.
+
 ### Added
 
-- Prepare a separate Orca workspace runtime for the selected official development MCP and X2D profiles. Durable workspace IDs coordinate a single on-demand GUI worker with checkpoint/recovery, a private Unix socket gateway and no direct printer network. The source passed independent review and all 35 isolated Linux tests passed. The initial source build failed during AppImage packaging; a corrected helper produced and extracted a synthetic AppImage offline without FUSE privileges, but the complete Orca image remains unbuilt. Synthetic X2D slice/export/restore and client qualification remain pending.
+- Add an unreleased, explicitly confirmed completed-job provider-reference reprint route with optional current-slot selection, preserved original nozzle binding and fresh printer preflight. It does not reslice or inspect original G-code bytes; uncertain task dispatch is not replayed. This candidate is not live-qualified.
+
+- Add explicit remote TUTK camera snapshots, bounded file browsing and checked workspace downloads through packaged direct networking, with request-scoped cleanup and shared operation locking. The private direct deployment passed one normal authenticated camera, list and download call; download response and artifact metadata matched the expected digest, without an independent post-publication byte readback.
+
+- Add optional provisioning from a verified operator-supplied Handy APK, private managed signing generations and expiry-based renewal, retaining direct PEM configuration and persistent sequence state.
+
+- Add explicit cloud-file print dispatch with account project upload and a single signed task request that also creates the account history entry; preserve artifact inspection, fresh printer preflight and no automatic replay.
+
+- Add account Filament Manager operations with explicit spool and slot identities, and on-demand cloud print history for the configured printer. Use the existing account session and surface denied or uncertain writes without retrying.
+
+- Add unified read-only spool rows with source-attributed load state and quantities, while keeping unidentified holders separate and preserving existing inventory fields.
+
+- Add read-only printer and account filament inventory with exact RFID-to-tray UUID matching and explicit unavailable cloud results. Weights and occupancy remain reported, not physical proof; the account API requires live qualification.
+
+- Prepare a separate Orca workspace runtime for the selected official development MCP and X2D profiles. Durable workspace IDs coordinate a single on-demand GUI worker with checkpoint/recovery, a private Unix socket gateway and no direct printer network. The corrected source build and runtime reached readiness and completed an isolated X2D slice and export. A later actual-image trial verified two clean closes, checkpoint and same-ID restore. The managed service and public OAuth metadata are deployed; a fresh-client slicer tool invocation remains unverified.
 
 - Add the candidate explicit `signed_mqtt` 3MF route: separately configured printer-storage TLS, capability and collision checks, upload and full size/SHA-256 readback, followed by checked signed MQTT project dispatch. `upload_file` supports upload-only; raw `upload_gcode` refuses this route. No automatic fallback or replay; a private X2D trial observed upload readback and a completed job, while wider model and physical-fit qualification remain open.
 
-- Add `get_printer_status({fresh:true})` for read-only fresh MQTT identity, state and error telemetry with a matching printer-returned serial and observation timestamps. Preserve default display status and existing internal print preflight behavior; this read does not authorize dispatch.
+- Add `get_printer_status({fresh:true})` for read-only fresh MQTT identity, state and error telemetry with a matching printer-returned serial and observation timestamps. Status now defaults to compact; request `detail: "full"` for the former detailed response. Preserve existing internal print preflight behavior; this read does not authorize dispatch.
 
 - Share one printer backend across stateless HTTP requests and add a private-token stdio-to-HTTP relay. Idle clients no longer occupy server session slots; legacy clients hold signed compatibility metadata, while modern clients use bounded operation continuations for confirmation. `MCP_HTTP_STATEFUL` must be absent or false; true fails startup. The relay recovers confirmed expired tickets for safe discovery only and never replays tool calls. Cancellation and client cleanup do not shut down the shared backend. The full suite passes 1,582 tests with 30 skips; Codex and Claude Code CLI metadata discovery passes through native HTTP and the relay. The private Linux service started and authenticated Codex metadata discovery succeeded; broader controls, printing and Claude Desktop GUI integration remain unverified.
 - Add opt-in signed local and cloud MQTT controls with operator-provided signing material, independent device trust and an explicitly initialized persistent counter. Fail closed when signing prerequisites are missing; keep native file transfer separate and do not automatically replay uncertain dispatches.

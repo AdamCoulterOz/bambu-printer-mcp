@@ -140,7 +140,7 @@ console.log('native_print result=0');
   await fs.writeFile(signedCa, "test trust");
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [...(signedInternal ? ["--experimental-loader", fileURLToPath(new URL("./signed-internal-loader.mjs", import.meta.url))] : []), "--import", `data:text/javascript,${encodeURIComponent(preload)}`, entry], cwd: dir,
+    args: [...(signedInternal ? ["--experimental-loader", fileURLToPath(new URL(env.SIGNED_CLOUD_TEST ? "./cloud-print-loader.mjs" : "./signed-internal-loader.mjs", import.meta.url))] : []), "--import", `data:text/javascript,${encodeURIComponent(preload)}`, entry], cwd: dir,
     env: { ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: model, BAMBU_PRINTER_MODEL: "",
       BAMBU_PRINTER_HOST: "127.0.0.1", BAMBU_PRINTER_SERIAL: x1c ? "00MTEST" : "20PTEST", BAMBU_PRINTER_ACCESS_TOKEN: "DUMMY",
       // An empty private home keeps a developer's real Linux setup out of the test.
@@ -1052,3 +1052,116 @@ for (const [scenario, expected] of [['login', {stage:'login',reason:'protocol',u
     assert.ok(!events.some(e=>e.value?.signed || e.kind==='ftp' || e.kind==='helper'));
   });
 }
+
+
+test("signed cloud tool keeps selected nozzle mapping and final safety gate", async t => {
+  const s=await server(t,{signedInternal:true,env:{SIGNED_CLOUD_TEST:'1',BAMBU_CLOUD_PRINT_ENABLED:'true',BAMBU_SIGNED_WRITE_TRANSPORT:'local',BAMBU_SIGNED_CLOUD_BROKER:'mqtts://us.mqtt.bambulab.com',BAMBU_SIGNED_CLOUD_USERNAME:'u_123',BAMBU_SIGNED_CLOUD_TOKEN:'dummy'}});
+  const result=await s.client.callTool({name:'print_3mf',arguments:{three_mf_path:s.file,bambu_model:'x2d',connection_mode:'signed_cloud',ams_slots:[0]}});
+  assert.notEqual(result.isError,true,JSON.stringify(result));
+  const events=await s.events(); const prep=events.find(e=>e.kind==='cloud-prepared');
+  assert.equal(prep.plate,1); assert.deepEqual(prep.task.nozzleMapping,[1]); assert.deepEqual(prep.task.amsMapping,[0]);
+  const i=events.findIndex(e=>e.kind==='cloud-prepared'), d=events.findIndex(e=>e.kind==='cloud-dispatch');
+  assert.ok(d>i && events.slice(i+1,d).some(e=>e.kind==='status'));
+  assert.ok(!events.some(e=>e.kind==='helper'||e.kind==='verified-upload'||e.value?.signed?.command==='project_file'));
+});
+
+test("signed cloud tool blocks dispatch when final safety fails", async t => {
+  const s=await server(t,{signedInternal:true,safetyConnectionFailAt:3,env:{SIGNED_CLOUD_TEST:'1',BAMBU_CLOUD_PRINT_ENABLED:'true',BAMBU_SIGNED_WRITE_TRANSPORT:'local',BAMBU_SIGNED_CLOUD_BROKER:'mqtts://us.mqtt.bambulab.com',BAMBU_SIGNED_CLOUD_USERNAME:'u_123',BAMBU_SIGNED_CLOUD_TOKEN:'dummy'}});
+  const result=await s.client.callTool({name:'print_3mf',arguments:{three_mf_path:s.file,bambu_model:'x2d',connection_mode:'signed_cloud',ams_slots:[0]}});
+  assert.equal(result.isError,true); assert.equal(result.structuredContent.printOutcome,'not-sent');
+  const events=await s.events(); assert.ok(events.some(e=>e.kind==='cloud-prepared')); assert.ok(!events.some(e=>e.kind==='cloud-dispatch'));
+});
+
+test('signing setup tool uses configured APK and normalizes account region',async t=>{
+  const s=await server(t,{signedInternal:true,env:{SIGNED_CLOUD_TEST:'1',BAMBU_SIGNING_BOOTSTRAP_ENABLED:'true',BAMBU_SIGNING_SOURCE_APK:'/trusted/source.apk',BAMBU_SIGNING_BOOTSTRAP_FILE:'',BAMBU_SIGNING_WRAPPING_CERTIFICATE_FILE:''}});
+  const result=await s.client.callTool({name:'account_setup_signing',arguments:{region:'china'}});
+  assert.notEqual(result.isError,true,JSON.stringify(result)); assert.doesNotMatch(JSON.stringify(result),/trusted\/source/);
+  const event=(await s.events()).find(e=>e.kind==='signing-setup'); assert.equal(event.region,'cn'); assert.equal(event.apk,'/trusted/source.apk');
+  const denied=await s.client.callTool({name:'account_setup_signing',arguments:{region:'china',apk:'/other.apk'}}); assert.equal(denied.isError,true);
+});
+
+test('explicit remote tools return an image and publish verified download to a workspace',async t=>{
+  const root=await trackedMkdtemp(path.join(await fs.realpath(os.tmpdir()),'remote-workspace-test-')); t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const s=await server(t,{signedInternal:true,env:{SIGNED_CLOUD_TEST:'1',BAMBU_TUTK_ENABLED:'true',BAMBU_TUTK_HELPER_URL:'',BAMBU_TUTK_HELPER_TOKEN_FILE:'',BAMBU_HANDY_OS_VERSION:'14',BAMBU_TUTK_OPERATION_LOCK_FILE:'/configured/lock',BAMBU_ARTIFACT_DIR:root,BAMBU_ARTIFACT_GROUP_GID:String(process.getgid())}});
+  const frame=await s.client.callTool({name:'remote_camera_snapshot',arguments:{}}); assert.equal(frame.content[0].type,'image'); assert.equal(frame.content[0].mimeType,'image/jpeg');
+  const list=await s.client.callTool({name:'remote_list_files',arguments:{kind:'video'}}); assert.match(JSON.stringify(list),/clip.mp4/);
+  const w=await s.client.callTool({name:'workspace_create',arguments:{}}); const workspace_id=w.structuredContent.workspace_id;
+  const result=await s.client.callTool({name:'remote_download_file',arguments:{workspace_id,path:'/clip.mp4',filename:'clip.mp4'}});
+  assert.notEqual(result.isError,true,JSON.stringify(result)); const parsed=JSON.parse(result.content[0].text);
+  assert.equal(parsed.filename,'clip.mp4'); assert.equal(parsed.size_bytes,5); assert.deepEqual(await fs.readFile(parsed.file_path),Buffer.from('video'));
+  assert.doesNotMatch(JSON.stringify(result),/base64|\/configured\/token/);
+  const unsafe=await s.client.callTool({name:'remote_download_file',arguments:{workspace_id,path:'/../secret',filename:'clip.mp4'}});assert.equal(unsafe.isError,true);
+});
+
+for (const route of ['cloud', 'remote']) for (const scenario of ['disabled', 'enabled', 'expired']) {
+  test(`${route} MCP proof ${scenario} renewal respects opt-in and blocks work on failure`, async t => {
+    const env = { SIGNED_CLOUD_TEST:'1', BAMBU_CLOUD_PRINT_ENABLED:'true', BAMBU_SIGNED_WRITE_TRANSPORT:'local', BAMBU_SIGNED_CLOUD_BROKER:'mqtts://us.mqtt.bambulab.com', BAMBU_SIGNED_CLOUD_USERNAME:'u_123', BAMBU_SIGNED_CLOUD_TOKEN:'dummy', BAMBU_TUTK_ENABLED:'true', BAMBU_HANDY_OS_VERSION:'14', BAMBU_TUTK_OPERATION_LOCK_FILE:'/configured/lock', BAMBU_TUTK_HELPER_URL:'http://localhost:9000', BAMBU_TUTK_HELPER_TOKEN_FILE:'/configured/token', BAMBU_SIGNING_AUTO_RENEW:scenario === 'disabled' ? 'false' : 'true', BAMBU_SIGNING_REGION:'global', SIGNED_TEST_RENEW_FAIL:scenario === 'expired' ? '1' : '' };
+    const s = await server(t,{signedInternal:true,env});
+    const result = route === 'cloud' ? await s.client.callTool({name:'print_3mf',arguments:{three_mf_path:s.file,bambu_model:'x2d',connection_mode:'signed_cloud',ams_slots:[0]}}) : await s.client.callTool({name:'remote_camera_snapshot',arguments:{}});
+    const events = await s.events(), proofs = events.filter(e => e.kind === 'http-proof');
+    assert.ok(proofs.length >= 1); assert.ok(proofs.every(e => e.renew === (scenario !== 'disabled')));
+    if (scenario === 'expired') {
+      assert.equal(result.isError,true); assert.ok(!events.some(e => e.kind === 'cloud-prepared' || e.kind === 'cloud-dispatch' || e.kind === 'remote'));
+    } else {
+      assert.notEqual(result.isError,true,JSON.stringify(result));
+      assert.ok(events.some(e => e.kind === (route === 'cloud' ? 'cloud-dispatch' : 'remote')));
+    }
+  });
+}
+
+for (const route of ['cloud', 'remote']) for (const scenario of ['bound', 'mismatch', 'changed_early', 'changed']) {
+  test(`${route} MCP uses configured bound credentials with ${scenario} account state`, async t => {
+    const env = { SIGNED_CLOUD_TEST:'1', BAMBU_CLOUD_PRINT_ENABLED:'true', BAMBU_SIGNED_WRITE_TRANSPORT:'local', BAMBU_SIGNED_CLOUD_BROKER:'mqtts://us.mqtt.bambulab.com', BAMBU_SIGNED_CLOUD_USERNAME:'u_123', BAMBU_SIGNED_CLOUD_TOKEN:'dummy', BAMBU_TUTK_ENABLED:'true', BAMBU_HANDY_OS_VERSION:'14', BAMBU_TUTK_OPERATION_LOCK_FILE:'/configured/lock', BAMBU_TUTK_HELPER_URL:'http://localhost:9000', BAMBU_TUTK_HELPER_TOKEN_FILE:'/configured/token', SIGNED_TEST_ACCOUNT_SCENARIO:scenario };
+    const s = await server(t,{signedInternal:true,env});
+    const status = await s.client.callTool({name:'account_status',arguments:{}});
+    assert.match(JSON.stringify(status), /not_configured/);
+    const result = route === 'cloud' ? await s.client.callTool({name:'print_3mf',arguments:{three_mf_path:s.file,bambu_model:'x2d',connection_mode:'signed_cloud',ams_slots:[0]}}) : await s.client.callTool({name:'remote_camera_snapshot',arguments:{}});
+    const events = await s.events(), binding = events.filter(e => e.kind === 'account-binding');
+    assert.equal(binding.length,1); assert.equal(binding[0].explicit,true); assert.equal(binding[0].signal,true);
+    if (scenario === 'bound') {
+      assert.notEqual(result.isError,true,JSON.stringify(result)); assert.ok(events.some(e => e.kind === (route === 'cloud' ? 'cloud-dispatch' : 'remote')));
+    } else {
+      assert.equal(result.isError,true); assert.ok(!events.some(e => e.kind === 'cloud-dispatch' || e.kind === 'remote'));
+      if (scenario === 'mismatch' || scenario === 'changed_early') assert.ok(!events.some(e => e.kind === 'cloud-prepared' || e.kind === 'http-proof'));
+    }
+  });
+}
+
+test('signing setup automatic choice needs no paths and preserves explicit source choices',async t=>{
+  const s=await server(t,{signedInternal:true,env:{SIGNED_CLOUD_TEST:'1',BAMBU_SIGNING_BOOTSTRAP_ENABLED:'true',BAMBU_SIGNING_SOURCE_APK:'',BAMBU_SIGNING_BOOTSTRAP_FILE:'',BAMBU_SIGNING_WRAPPING_CERTIFICATE_FILE:''}});
+  for(const args of [{region:'global'},{region:'china',method:'automatic'}]) {
+    const result=await s.client.callTool({name:'account_setup_signing',arguments:args});
+    assert.notEqual(result.isError,true,JSON.stringify(result)); assert.doesNotMatch(JSON.stringify(result),/source|apk|private/);
+  }
+  const events=(await s.events()).filter(e=>e.kind==='signing-setup');
+  assert.deepEqual(events.map(e=>[e.method,e.region,e.hasSignal]),[['automatic','global',true],['automatic','cn',true]]);
+  const invalid=await s.client.callTool({name:'account_setup_signing',arguments:{region:'global',method:'files'}}); assert.equal(invalid.isError,true);
+});
+test('signing setup keeps configured manual files and supplied APK compatibility',async t=>{
+  const files=await server(t,{signedInternal:true,env:{SIGNED_CLOUD_TEST:'1',BAMBU_SIGNING_BOOTSTRAP_ENABLED:'true',BAMBU_SIGNING_SOURCE_APK:'',BAMBU_SIGNING_BOOTSTRAP_FILE:'/private/source',BAMBU_SIGNING_WRAPPING_CERTIFICATE_FILE:'/private/wrap'}});
+  const result=await files.client.callTool({name:'account_setup_signing',arguments:{region:'global'}}); assert.notEqual(result.isError,true,JSON.stringify(result));
+  const event=(await files.events()).find(e=>e.kind==='signing-setup'); assert.equal(event.method,'files'); assert.equal(event.hasSignal,true);
+});
+
+test('remote archive and mutations use normal MCP boundary and safe explicit prechecks',async t=>{
+ const root=await trackedMkdtemp(path.join(await fs.realpath(os.tmpdir()),'remote-actions-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const s=await server(t,{signedInternal:true,env:{SIGNED_CLOUD_TEST:'1',BAMBU_TUTK_ENABLED:'true',BAMBU_HANDY_OS_VERSION:'14',BAMBU_TUTK_OPERATION_LOCK_FILE:'/configured/lock',BAMBU_ARTIFACT_DIR:root,BAMBU_ARTIFACT_GROUP_GID:String(process.getgid())}});
+ const w=await s.client.callTool({name:'workspace_create',arguments:{}}),workspace_id=w.structuredContent.workspace_id;
+ const existing=await s.client.callTool({name:'remote_download_file',arguments:{workspace_id,path:'/clip.mp4',filename:'clip.mp4'}});const artifact=JSON.parse(existing.content[0].text);
+ const denied=await s.client.callTool({name:'remote_upload_file',arguments:{workspace_id,artifact_id:artifact.artifact_id,storage:'udisk',allow_history_rotation:true}});assert.equal(denied.isError,true);
+ const upload=await s.client.callTool({name:'remote_upload_file',arguments:{workspace_id,artifact_id:artifact.artifact_id,storage:'emmc',allow_history_rotation:true}});assert.equal(JSON.parse(upload.content[0].text).receipt.status,'verified');
+ const refused=await s.client.callTool({name:'remote_delete_file',arguments:{path:'/clip.mp4',kind:'video',confirm:true,expected_size:6}});assert.equal(JSON.parse(refused.content[0].text).receipt.status,'not_sent');
+ const removed=await s.client.callTool({name:'remote_delete_file',arguments:{path:'/clip.mp4',kind:'video',confirm:true,expected_size:5}});assert.equal(JSON.parse(removed.content[0].text).receipt.status,'acknowledged');
+ const page=await s.client.callTool({name:'remote_archive_members',arguments:{path:'/clip.mp4',limit:1}});assert.deepEqual(JSON.parse(page.content[0].text).members,['Metadata/a.xml']);
+ const extract=await s.client.callTool({name:'remote_archive_extract',arguments:{path:'/clip.mp4',member:'Metadata/a.xml',workspace_id,filename:'a.xml'}});const saved=JSON.parse(extract.content[0].text);assert.equal(saved.filename,'a.xml');assert.equal((await fs.readFile(saved.file_path)).toString(),'preview');
+ await fs.chmod(artifact.file_path,0o600);await fs.writeFile(artifact.file_path,'other');
+ const tampered=await s.client.callTool({name:'remote_upload_file',arguments:{workspace_id,artifact_id:artifact.artifact_id,storage:'emmc',allow_history_rotation:true}});assert.equal(tampered.isError,true);
+ const events=await s.events();assert.equal(events.filter(e=>e.kind==='remote'&&e.operation.operation==='delete').length,2);assert.equal(events.filter(e=>e.kind==='remote'&&e.operation.operation==='upload').length,1);
+});
+
+test('remote upload returns typed unknown receipt without retry',async t=>{
+ const root=await trackedMkdtemp(path.join(await fs.realpath(os.tmpdir()),'remote-unknown-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const s=await server(t,{signedInternal:true,env:{SIGNED_CLOUD_TEST:'1',SIGNED_TEST_REMOTE_UNKNOWN:'1',BAMBU_TUTK_ENABLED:'true',BAMBU_HANDY_OS_VERSION:'14',BAMBU_TUTK_OPERATION_LOCK_FILE:'/configured/lock',BAMBU_ARTIFACT_DIR:root,BAMBU_ARTIFACT_GROUP_GID:String(process.getgid())}});
+ const w=await s.client.callTool({name:'workspace_create',arguments:{}}),workspace_id=w.structuredContent.workspace_id;const f=await s.client.callTool({name:'remote_download_file',arguments:{workspace_id,path:'/clip.mp4',filename:'clip.mp4'}}),artifact=JSON.parse(f.content[0].text);
+ const result=await s.client.callTool({name:'remote_upload_file',arguments:{workspace_id,artifact_id:artifact.artifact_id,storage:'emmc',allow_history_rotation:true}});const receipt=JSON.parse(result.content[0].text).receipt;assert.equal(receipt.status,'unknown');assert.equal(receipt.retryable,false);assert.equal((await s.events()).filter(e=>e.kind==='remote'&&e.operation.operation==='upload').length,1);
+});

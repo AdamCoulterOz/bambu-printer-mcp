@@ -24,3 +24,10 @@ services:
         source: ${ORCA_TOKEN_FILE:?Set private token file owned by UID 10001}
         target: /run/secrets/orca-token
         read_only: true
+    # Optional workspace file exchange, after infrastructure verifies the
+    # supplementary artifact group and host ownership/permissions:
+    # group_add: ["${ARTIFACT_GROUP_GID}"]
+    # Mount only Node's published subtree RO at the identical absolute path
+    # /srv/bambu-artifacts/published, and the shared outbox RW at
+    # /srv/bambu-outbox with ORCA_EXPORT_DIR=/srv/bambu-outbox.
+    # Do not mount Node's private store, home, printer keys or signing counter.

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { compactPrinterStatus } from './printers/compact-status.js';
+import { matchFilamentLibrary, unifyFilamentInventory } from './filament-library.js';
+import { workspaceArtifactTools, handleWorkspaceArtifactTool, WorkspaceArtifactError } from "./workspace-artifacts.js";
 import { physicalProblems } from "./counterpart/visual-evidence.js";
 import { flightKey } from "./counterpart/flight-record.js";
 import { FLIGHT_RECORD_PROPERTIES, FLIGHT_RECORD_DESCRIPTION, FLIGHT_RECORD_OUTPUT_SCHEMA, flightReadOptions, flightRecordResult, FLIGHT_ASSESS_PROPERTIES, FLIGHT_ASSESS_REQUIRED, FLIGHT_ASSESS_DESCRIPTION, PRINT_EVIDENCE_GUIDANCE, visualSubmission } from "./counterpart/flight-tools.js";
@@ -52,7 +55,7 @@ import { inspectPrintFile } from "./safety/print-file.js";
 import { previewPrintFile } from "./safety/print-preview.js";
 import { loadSafe3mfArchive } from "./safety/archive.js";
 import { SERIAL_MODELS, internalPrintingSupported, externalStorageState, validatePrinterState } from "./safety/printer-state.js";
-import { isDualNozzleModel } from "./safety/limits.js";
+import { isDualNozzleModel, normalizeModel } from "./safety/limits.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 import { bambuPrinterInfo, bambuSliceCapabilities } from "./counterpart/info.js";
@@ -67,6 +70,8 @@ import { SELF_CHECK_OUTPUT_SCHEMA, selfCheck } from "./counterpart/self-check.js
 import { parseProcessOverrides } from "./slicer/process-overrides.js";
 import { PRINT_QUALITY_PROPERTIES, withPrintQuality } from "./slicer/print-quality.js";
 import { PrinterRefusal, withPrintDispatch, markPrintCommandSent, printOutcome } from "./refusal.js";
+import { executeReferenceReprint, ReferenceDispatchUnknown } from "./account/reference-dispatch.js";
+import { markReferenceUnknown, discardUnsentReferenceHold, bindReferenceTask, inspectReferenceHold, observeReferenceHold, clearReferenceHold } from "./safety/reference-hold.js";
 import { uploadProgressReporter } from "./upload-progress.js";
 import { machinePauseGcode, parsePauseLayers, pausedLayers, readPlateGcode } from "./slicer/layer-pauses.js";
 dotenv.config();
@@ -135,7 +140,7 @@ let DEFAULT_BAMBU_CONNECTION_MODE = process.env.BAMBU_DEFAULT_CONNECTION_MODE?.t
 let DEFAULT_BAMBU_CONNECTION_TYPE = process.env.BAMBU_DEFAULT_CONNECTION_TYPE?.trim().toLowerCase() || "";
 /** The connection configured at start, before counterpart_print_route changes it: its own local route is kept. */
 const CONFIGURED_CONNECTION = { mode: DEFAULT_BAMBU_CONNECTION_MODE, type: DEFAULT_BAMBU_CONNECTION_TYPE };
-const CONNECTION_MODES = ["lan_mqtt_ftps", "bambu_native", "bambu_network", "bambu_connect", "signed_mqtt"];
+const CONNECTION_MODES = ["lan_mqtt_ftps", "bambu_native", "bambu_network", "bambu_connect", "signed_mqtt", "signed_cloud"];
 /**
  * The one route decision for a printer: print_3mf and every print control
  * (cancel, pause, resume) resolve it here, so a job is never controlled over a
@@ -464,17 +469,27 @@ function parseIntegerOrNull(value) {
     const parsed = Number.parseInt(String(value), 10);
     return Number.isFinite(parsed) ? parsed : null;
 }
-function normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter) {
+function normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter, fullInventory = false) {
     const rawAms = status?.raw?.ams || status?.ams || {};
     const trayNow = parseIntegerOrNull(rawAms?.tray_now);
     const trays = [];
-    const amsArray = Array.isArray(rawAms?.ams) ? rawAms.ams : [];
+    const amsArray = Array.isArray(rawAms?.ams) ? [...rawAms.ams] : [];
+    const raw = status?.raw ?? status;
+    if (fullInventory) {
+        const external = Array.isArray(raw?.vir_slot) ? raw.vir_slot : [];
+        if (external.length)
+            amsArray.push({ id: null, tray: external, external: true });
+        else if (raw?.vt_tray && typeof raw.vt_tray === "object")
+            amsArray.push({ id: null, tray: [raw.vt_tray], external: true, legacy: true });
+    }
     for (const [amsIndex, amsUnit] of amsArray.entries()) {
         const trayArray = Array.isArray(amsUnit?.tray) ? amsUnit.tray : [];
         for (const [trayIndex, tray] of trayArray.entries()) {
-            const amsId = parseIntegerOrNull(amsUnit?.id) ?? amsIndex;
-            const trayId = parseIntegerOrNull(tray?.id) ?? trayIndex;
-            const slot = amsId !== null && trayId !== null ? amsId * 4 + trayId : null;
+            const external = fullInventory && amsUnit.external === true;
+            const amsId = external ? null : parseIntegerOrNull(amsUnit?.id) ?? amsIndex;
+            const trayId = external ? parseIntegerOrNull(tray?.id) : parseIntegerOrNull(tray?.id) ?? trayIndex;
+            const slot = external ? (trayId === 254 || trayId === 255 ? trayId : null) :
+                amsId !== null && trayId !== null ? (fullInventory && amsId >= 128 ? amsId + trayId : amsId * 4 + trayId) : null;
             const state = parseIntegerOrNull(tray?.state) ?? 0;
             const trayInfoIdx = typeof tray?.tray_info_idx === "string" ? tray.tray_info_idx : null;
             const profileResolution = trayInfoIdx
@@ -493,17 +508,44 @@ function normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter) {
                 trayType,
                 trayColor ? `#${normalizeRgbColor(trayColor) ?? trayColor.replace(/^#/, "").slice(0, 6)}` : null,
             ].filter(Boolean);
+            const nonempty = (value) => typeof value === "string" && value.trim() ? value.trim() : null;
+            const identifier = (value) => {
+                const text = nonempty(value);
+                return text && !/^(?:0+|f+)$/i.test(text) ? text : null;
+            };
+            const bounded = (value, max) => {
+                if ((typeof value !== "number" && typeof value !== "string") || value === "" || (typeof value === "string" && !value.trim()))
+                    return null;
+                const n = Number(value);
+                return Number.isFinite(n) && n >= 0 && n <= max ? n : null;
+            };
+            const reportedMaterial = Boolean(nonempty(trayInfoIdx) || nonempty(trayType) || identifier(tray?.tag_uid) || identifier(tray?.tray_uuid));
+            // A missing material or identifier does not establish an empty physical holder.
+            const occupancy = reportedMaterial ? "reported_loaded" : "unknown";
+            const nominal = bounded(tray?.tray_weight, 100000);
+            const remaining = bounded(tray?.remain_g, 100000);
+            const dual = ["h2d", "h2dpro", "h2c", "x2d"].includes(String(bambuModel ?? status?.model ?? "").toLowerCase().replace(/[ _-]/g, ""));
             trays.push({
+                ...(fullInventory ? {
+                    source: external ? "external" : "ams",
+                    occupancy,
+                    physical_extruder: external && dual && (slot === 255 || slot === 254)
+                        ? slot === 255 ? { index: 0, position: "right", role: "main" } : { index: 1, position: "left", role: "deputy" }
+                        : null,
+                    tag_uid: identifier(tray?.tag_uid), tray_uuid: identifier(tray?.tray_uuid),
+                    nominal_weight_g: nominal, remaining_weight_g: remaining,
+                    weight_provenance: { nominal: nominal === null ? null : "tray_weight", remaining: remaining === null ? null : "remain_g" },
+                } : {}),
                 ams_id: amsId,
                 tray_id: trayId,
                 slot,
                 state,
-                loaded: state !== 0 && Boolean(trayInfoIdx),
+                loaded: fullInventory ? occupancy === "reported_loaded" : state !== 0 && Boolean(trayInfoIdx),
                 tray_info_idx: trayInfoIdx,
                 tray_type: trayType,
                 tray_sub_brands: traySubBrands,
                 tray_color: trayColor,
-                remain_percent: typeof tray?.remain === "number" && tray.remain >= 0 ? tray.remain : null,
+                remain_percent: fullInventory ? bounded(tray?.remain, 100) : typeof tray?.remain === "number" && tray.remain >= 0 ? tray.remain : null,
                 nozzle_temp_min: parseIntegerOrNull(tray?.nozzle_temp_min),
                 nozzle_temp_max: parseIntegerOrNull(tray?.nozzle_temp_max),
                 resolved_base_profile_name: profileResolution.baseName,
@@ -511,7 +553,7 @@ function normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter) {
                 profile_resolution: profileResolution.resolution,
                 match_confidence: matchConfidence,
                 display_name: displayParts.length > 0 ? displayParts.join(" ") : "empty/unknown",
-                label: amsId !== null && trayId !== null ? bambuTrayLabel(amsId, trayId) : null,
+                label: external ? "External" : amsId !== null && trayId !== null ? bambuTrayLabel(amsId, trayId) : null,
                 spool_name: trayType ? spoolName(traySubBrands || trayType, trayInfoIdx && trayColor ? colourNames().spool(trayInfoIdx, trayColor) : undefined) : null,
                 profile_candidates: profileResolution.paths,
             });
@@ -522,16 +564,17 @@ function normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter) {
         loadedTrays.find((tray) => tray.resolved_profile_path) ||
         null;
     const recommendedReason = recommendedTray?.slot === trayNow
-        ? "current AMS slot with resolved slicer profile"
+        ? `current ${recommendedTray.source === "external" ? "external" : "AMS"} slot with resolved slicer profile`
         : recommendedTray
-            ? "first loaded AMS slot with resolved slicer profile"
+            ? `first loaded ${recommendedTray.source === "external" ? "external" : "AMS"} slot with resolved slicer profile`
             : null;
     const allProfilePaths = Array.from(new Set(loadedTrays
         .map((tray) => tray.resolved_profile_path)
         .filter((candidate) => Boolean(candidate))));
-    const emptySlots = trays.filter((tray) => !tray.loaded).length;
+    const emptySlots = trays.filter((tray) => fullInventory ? tray.occupancy === "reported_empty" : !tray.loaded).length;
     const resolvedProfileSlots = loadedTrays.filter((tray) => tray.resolved_profile_path).length;
     return {
+        ...(fullInventory ? { observation: { source: "mqtt_display", connected: status?.connected === true, freshness: "not_guaranteed", completeness: "unknown" } } : {}),
         current_slot: trayNow !== null && trayNow >= 0 && trayNow < 254 ? trayNow : null,
         current_source: trayNow === 254 ? "external" : trayNow !== null && trayNow >= 0 && trayNow < 254 ? "ams" : null,
         summary: {
@@ -539,6 +582,7 @@ function normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter) {
             resolved_profile_slots: resolvedProfileSlots,
             unresolved_loaded_slots: loadedTrays.length - resolvedProfileSlots,
             empty_slots: emptySlots,
+            ...(fullInventory ? { unknown_slots: trays.filter((tray) => tray.occupancy === "unknown").length } : {}),
             current_slot: trayNow !== null && trayNow >= 0 && trayNow < 254 ? trayNow : null,
             current_source: trayNow === 254 ? "external" : trayNow !== null && trayNow >= 0 && trayNow < 254 ? "ams" : null,
             recommended_slot: recommendedTray?.slot ?? null,
@@ -1570,7 +1614,7 @@ export class BambuPrinterMCPServer {
             validatePrinterState(confirmedStatus, requirements);
             this.bambu.assertPrintPreflight(confirmedStatus, preflight);
             const amsMapping = stringifyBridgeJson(mapping?.map(value => bridgeAmsMappingValue(value, isDualNozzleModel(printModel))));
-            const remoteFileName = native?.signed ? `checked-${randomUUID()}.gcode.3mf` : uniquePrintName(threeMFPath);
+            const remoteFileName = native?.signed || native?.cloud ? `checked-${randomUUID()}.gcode.3mf` : uniquePrintName(threeMFPath);
             const checkedName = remoteFileName.replace(/(?:\.gcode)?\.3mf$/i, "");
             if (cloudFallbackMethod && externalStorageState(confirmedStatus.raw) !== "normal") {
                 // Studio sends straight through the cloud when the printer has no storage for the LAN upload.
@@ -1631,6 +1675,54 @@ export class BambuPrinterMCPServer {
                 try_emmc_print: args?.try_emmc_print !== undefined ? Boolean(args.try_emmc_print) : false,
             };
             assertActive();
+            if (native?.cloud) {
+                if (!signedControlsRequested(process.env) || process.env.BAMBU_CLOUD_PRINT_ENABLED !== 'true')
+                    throw new Error('signed_cloud requires enabled signed controls and BAMBU_CLOUD_PRINT_ENABLED=true.');
+                const signing = await resolveSignedControlConfiguration(process.env, devIp, password || bambuToken, devId);
+                if (!signing)
+                    throw new Error('Signed cloud configuration is unavailable.');
+                const credentials = await accountManager.getConfiguredCloudMqttCredentials(devId, process.env, native.signal);
+                const broker = new URL(credentials.url);
+                const api = broker.hostname === 'cn.mqtt.bambulab.com' ? 'https://api.bambulab.cn' : ['us.mqtt.bambulab.com', 'eu.mqtt.bambulab.com'].includes(broker.hostname) ? 'https://api.bambulab.com' : undefined;
+                if (!api || broker.protocol !== 'mqtts:' || broker.username || broker.password || broker.search || broker.hash || (broker.pathname && broker.pathname !== '/'))
+                    throw new Error('Unsupported signed cloud broker.');
+                if (isDualNozzleModel(printModel) && (!inspection.filamentNozzleIndices || inspection.filamentNozzleIndices.length !== inspection.materials.length || inspection.filamentNozzleIndices.length > 64 || inspection.filamentNozzleIndices.some(value => value !== 0 && value !== 1)))
+                    throw new Error('Selected plate requires complete verified physical nozzle mappings.');
+                const mapped = mapping?.map(value => bridgeAmsMappingValue(value, isDualNozzleModel(printModel))) ?? [];
+                const mapped2 = (mapping ?? []).map(value => {
+                    if (value < 0)
+                        return { amsId: 255, slotId: 0 };
+                    const entry = bridgeAmsMapping2Entry(value, isDualNozzleModel(printModel));
+                    return { amsId: entry.ams_id, slotId: entry.slot_id };
+                });
+                const task = {
+                    amsDetailMapping: params.ams_mapping_info ? JSON.parse(String(params.ams_mapping_info)) : [],
+                    amsMapping: mapped, amsMapping2: mapped2, autoBedLeveling: studio.auto_bed_leveling,
+                    bedLeveling: studio.task_bed_leveling, bedType: printBedType, cfg: params.task_ext_change_assist ? '1' : '0', cover: '',
+                    deviceId: devId, extrudeCaliFlag: studio.auto_flow_cali, extrudeCaliManualMode: studio.extruder_cali_manual_mode,
+                    filamentSettingIds: [], flowCali: studio.task_flow_cali, layerInspect: studio.task_layer_inspect,
+                    nozzleInfos: [], ...(isDualNozzleModel(printModel) ? { nozzleMapping: inspection.filamentNozzleIndices } : {}),
+                    nozzleOffsetCali: studio.auto_offset_cali, oriModelId: params.origin_model_id, oriProfileId: params.origin_profile_id, sequence_id: '20001',
+                    timelapse: Boolean(params.task_record_timelapse), title: checkedName, useAms: useAMS, vibrationCali: studio.task_vibration_cali,
+                };
+                const { submitCloudPrint } = await import('./cloud-print.js');
+                const { handyClientHeaders, createHttpProof } = await import('./signing/http-proof.js');
+                const clientHeaders = await handyClientHeaders(signing.sequenceStore, process.env.BAMBU_HANDY_OS_VERSION?.trim() || '');
+                const receipt = await submitCloudPrint({ api, token: credentials.password, username: credentials.username, signingDirectory: signing.operatorPemDirectory, clientHeaders,
+                    filePath: snapshot, sha256: inspection.sha256, filename: remoteFileName, plate: plateIndex + 1, task, signal: native.signal, proofFactory: directory => createHttpProof(directory, undefined, signing.autoRenew), assertAuthority: () => credentials.assertGenerationCurrent(),
+                    beforeDispatch: async () => {
+                        assertActive();
+                        await credentials.assertCurrent();
+                        const latest = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+                        validatePrinterState(latest, requirements);
+                        this.bambu.assertPrintPreflight(latest, preflight);
+                        assertActive();
+                    },
+                    onDispatch: () => { this.bambu.recordFlightDispatch(devIp, devId, remoteFileName, requirements, resumeFile); retainForDispatchedUpload(); markPrintCommandSent(); },
+                });
+                this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, resumeFile, false);
+                return { status: 'success', route: 'signed_cloud', ...receipt, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping };
+            }
             if (native?.signed) {
                 if (!signedControlsRequested(process.env))
                     throw new Error("signed_mqtt requires explicitly enabled signed controls.");
@@ -1786,7 +1878,7 @@ export class BambuPrinterMCPServer {
                 amsMapping: mapping,
                 params: redactPrintParams(params),
             };
-        }, native?.signed ? undefined : bridgeSnapshotRoot()));
+        }, native?.signed || native?.cloud ? undefined : bridgeSnapshotRoot()), true);
     }
     async handoff3mfViaBambuConnect(args) {
         if (!args?.three_mf_path) {
@@ -1884,9 +1976,9 @@ export class BambuPrinterMCPServer {
             }, onUpdate, { signal, assertActive });
         });
     }
-    async getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, bambuModel, nozzleDiameter) {
+    async getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, bambuModel, nozzleDiameter, fullInventory = false) {
         const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
-        let inventory = normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter);
+        let inventory = normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter, fullInventory);
         // The first MQTT push from an idle printer is sparse (model/modules
         // only). AMS data arrives on a second push a short while later. If
         // we have a live connection but no loaded trays, wait for the follow-
@@ -1894,7 +1986,7 @@ export class BambuPrinterMCPServer {
         if (inventory.trays.length === 0 && status.connected) {
             await new Promise((r) => setTimeout(r, 1500));
             const retryStatus = await this.bambu.getStatus(host, bambuSerial, bambuToken);
-            inventory = normalizePrinterFilamentInventory(retryStatus, bambuModel, nozzleDiameter);
+            inventory = normalizePrinterFilamentInventory(retryStatus, bambuModel, nozzleDiameter, fullInventory);
         }
         return inventory;
     }
@@ -2191,17 +2283,27 @@ export class BambuPrinterMCPServer {
                 tools: [
                     AGENT_READINESS_TOOL,
                     AGENT_GUIDE_TOOL,
+                    ...workspaceArtifactTools,
                     { name: "account_status", description: "Report whether a private cached Bambu account session exists; ready does not mean it was validated online.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
                     { name: "account_login", description: "Start a short-lived local browser login; credentials and verification codes are entered only in that browser.", inputSchema: { type: "object", properties: { region: { type: "string", enum: ["global", "china"], description: "The Bambu account region." } }, required: ["region"], additionalProperties: false } },
+                    { name: "account_setup_signing", description: "Explicitly issue or renew signing credentials. Automatic setup downloads one verified official package; supplied APK and private source files remain supported. Requires BAMBU_SIGNING_BOOTSTRAP_ENABLED=true and a private signing directory. Returns expiry; no secrets are accepted as arguments.", inputSchema: { type: "object", properties: { region: { type: "string", enum: ["global", "china"], description: "Bambu region for issuance." }, method: { type: "string", enum: ["automatic", "apk", "files"], description: "Source method; omission preserves configured sources and otherwise selects automatic." } }, required: ["region"], additionalProperties: false } },
                     { name: "account_cancel_login", description: "Cancel the pending local browser login.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
                     { name: "account_list_printers", description: "List printer names, models and serials bound to the cached Bambu account; contacts Bambu.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+                    { name: "account_list_filament_inventory", description: "Read the Bambu account cloud filament library, including manually added and unloaded reels. Cloud weights are reported values, not measurements; null means unknown. Requires complete cloud credentials or a cached account session. A no-total response is one bounded catalogue read; neither mode proves an atomic snapshot or independent account count.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+                    { name: "account_filament_manager", description: "Manage the configured Bambu account filament library. The operation config or pending reads account data. create/update/delete modify explicitly identified reels. sync_mappings requires an explicit bind or unbind for every selected slot; sync_ams requires complete explicit RFID items and an explicit createNew to create a reel. resolve_pending accepts accept, link_other or create_new. Use account_list_filament_inventory first for IDs. The selected configured printer supplies devId. Cloud writes can be rejected or uncertain; inspect inventory before retrying. Payload fields are described by each operation and follow the Bambu cloud filament schema.", inputSchema: { type: "object", properties: { operation: { type: "string", description: "Choose the account read or the explicit inventory change to perform.", enum: ["config", "pending", "create", "update", "delete", "sync_mappings", "sync_ams", "resolve_pending"] }, payload: { type: "object", description: "config uses {}. pending accepts optional amsSn. create requires filamentName and accepts filamentId, filamentType, filamentVendor, color, colorType, colors, netWeight, totalNetWeight, note, trayIdName, createType, isSupport, RFID, rolls and status. update adds the numeric id. delete accepts ids as numeric spool IDs. sync_mappings accepts mappings, each with explicit operation bind/unbind, amsId, amsSn, amsType and slotId. Bind adds spoolId and optional rfid. sync_ams accepts items, each requiring RFID, amsId, amsSn, amsType, slotId, color, colorType, colors, filamentId, filamentName, filamentType, filamentVendor, isSupport, netWeight, totalNetWeight, note and trayIdName, with spoolId for an existing reel or explicit createNew:true for a new reel. resolve_pending accepts action accept, create_new or link_other, plus spoolId and targetSpoolId for link_other." } }, required: ["operation"], additionalProperties: false } },
+                    { name: "account_cloud_print_history", description: "Read one printer-filtered Bambu history page. Carry next_offset to request another page; printer_reported_total is the upstream filtered total, not an account total. Pages are cached separately for 60 seconds and are not an atomic snapshot. No print is initiated.", inputSchema: { type: "object", properties: { offset: { type: "integer", minimum: 0, maximum: 10000000, default: 0, description: "Zero-based upstream page offset; use the previous next_offset to continue." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 50, description: "Maximum tasks requested for this page, from 1 to 100; defaults to 50." } }, additionalProperties: false } },
+                    { name: "account_cloud_print_thumbnail", description: "Read the cover image of an owned task on the configured printer. Large task IDs can be supplied as decimal strings. Only supported cloud media hosts are eligible; URLs and credentials are not returned.", inputSchema: { type: "object", properties: { task_id: { description: "Owned task ID on the configured printer; use a decimal string for IDs above JavaScript's safe integer range.", anyOf: [{ type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, { type: "string", pattern: "^[1-9][0-9]{0,19}$" }] } }, required: ["task_id"], additionalProperties: false } },
+                    { name: "account_reprint_cloud_task", description: "Request an original completed job from its owned provider reference. Original G-code bytes and temperatures are not inspected; fresh printer checks and physical confirmation are required. No slicing or upload is performed. Optional current_mapping explicitly selects current physical slots while retaining the original nozzle binding.", inputSchema: { type: "object", properties: { task_id: { description: 'Owned completed task ID; use a decimal string for IDs above the safe integer range.', anyOf: [{ type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, { type: "string", pattern: "^[1-9][0-9]{0,19}$" }] }, confirm_original_job_reference: { type: "boolean", const: true, description: 'Set true to request the original completed-job reference, acknowledging that its G-code bytes and temperatures are not inspected.' }, current_mapping: { type: "array", minItems: 1, maxItems: 64, description: 'Optional complete explicit selection of current slots for every used filament; original nozzle bindings are retained and each slot is checked against fresh telemetry.', items: { type: 'object', description: 'One unique selected physical slot for a used source filament.', properties: { filamentId: { type: 'integer', minimum: 1, maximum: 64, description: 'One-based source project filament ID.' }, ams: { type: 'integer', minimum: 0, maximum: 255, description: 'Canonical flat physical tray index.' }, amsId: { type: 'integer', minimum: 0, maximum: 255, description: 'Physical AMS unit ID corresponding to the flat index.' }, slotId: { type: 'integer', minimum: 0, maximum: 255, description: 'Slot ID within that AMS unit.' } }, required: ['filamentId', 'ams', 'amsId', 'slotId'], additionalProperties: false } } }, required: ["task_id", "confirm_original_job_reference"], additionalProperties: false } },
+                    { name: 'account_reprint_hold', description: 'Inspect or observe a durable reference-print hold. Recover requires explicit acknowledgment and a person to inspect the printer and account history; it never sends a printer command.', inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'observe', 'recover'], description: 'Choose status, observe a fresh report without automatically clearing the hold, or request human-confirmed recovery of a pending or unknown dispatch.' }, acknowledge_review: { type: 'boolean', description: 'For recovery, set true after reviewing the printer and account history; a separate physical confirmation is still required.' } }, required: ['action'], additionalProperties: false } },
+                    { name: "get_filament_inventory", description: "Read unified account reel rows alongside separate unmatched printer observations and reported slots. Unmatched observations may overlap account reels. Exact unique RFID/UUID matches only; unmatched library records are not proven unloaded. Printer status may be cached or incomplete and cloud weights are reported estimates. Library failures are reported without hiding printer slots.", inputSchema: { type: "object", properties: { include_library: { type: "boolean", description: "Read account cloud library (default true)." }, bambu_model: { type: "string", enum: [...VALID_BAMBU_MODELS], description: "Optional model for filament profile resolution." }, nozzle_diameter: { type: "string", description: "Optional nozzle diameter for profile resolution." } }, additionalProperties: false } },
                     { name: "account_logout", description: "Cancel login and remove the private local cached account session; does not revoke a remote session.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
                     {
                         name: "get_printer_status",
-                        description: "Get Bambu printer display status, or use fresh:true for new MQTT state and error reports with a verified returned serial, observed model and observation timestamps. Fresh identity telemetry alone does not authorize printing or prove full print readiness.",
+                        description: "Get Bambu printer display status. Compact monitoring without raw telemetry is the default; use detail:full for the legacy full response. Use fresh:true for new MQTT state and error reports with a verified returned serial, observed model and observation timestamps. Fresh identity telemetry alone does not authorize printing or prove full print readiness.",
                         inputSchema: {
                             type: "object",
                             properties: {
+                                detail: { type: "string", enum: ["compact", "full"], description: "Compact allowlisted monitoring data (default), or full legacy response." },
                                 fresh: {
                                     type: "boolean",
                                     description: "Require new MQTT telemetry with matching printer-returned serial and observed model; never use cached or configured identity. Default false preserves display status."
@@ -2223,7 +2325,7 @@ export class BambuPrinterMCPServer {
                     },
                     {
                         name: "get_printer_filaments",
-                        description: "Get the live AMS/external filament inventory from the printer over MQTT, including loaded/empty slot summary, resolved slicer profile paths, match confidence, and recommended load_filaments when the printer model is known.",
+                        description: "Get reported AMS and external filament slots, occupancy evidence, identifiers, weights and resolved slicer profiles. Reported metadata does not prove the physical contents; unknown slots remain unknown.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -2664,6 +2766,13 @@ export class BambuPrinterMCPServer {
                         }
                     },
                     ...CAMERA_STREAM_TOOLS,
+                    { name: "remote_camera_snapshot", description: "Read one camera frame through direct in-process TUTK networking; returns an MCP JPEG image. Requires configured account and application signing credentials.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+                    { name: "remote_list_files", description: "List bounded model, video or timelapse metadata through direct in-process TUTK networking.", inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["model", "video", "timelapse"], description: "Category of printer files to list." }, storage: { type: "string", enum: ["", "internal", "external", "emmc", "udisk", "sdcard", "usb"], description: "Optional reported printer storage selector; empty selects the printer default." } }, required: ["kind"], additionalProperties: false } },
+                    { name: "remote_download_file", description: "Download one printer file through direct in-process TUTK networking, verify it and publish it into an existing workspace. Files are limited to 16 MiB and require normal inspection and safety checks before printing.", inputSchema: { type: "object", properties: { path: { type: "string", description: "Absolute printer file path returned by the remote list." }, workspace_id: { type: "string", description: "Existing destination workspace ID." }, filename: { type: "string", description: "Safe destination filename within the workspace." } }, required: ["path", "workspace_id", "filename"], additionalProperties: false } },
+                    { name: "remote_upload_file", description: "Upload a verified workspace artifact to printer internal history without printing. History may rotate; explicit consent is required.", inputSchema: { type: "object", properties: { workspace_id: { type: "string", description: "ID of the existing workspace containing the artifact." }, artifact_id: { type: "string", description: "ID of the verified source artifact in that workspace." }, storage: { type: "string", enum: ["emmc", "udisk"], description: "Destination storage; currently only emmc is supported." }, allow_history_rotation: { type: "boolean", description: "Set true to consent to possible rotation of printer history during upload." } }, required: ["workspace_id", "artifact_id", "storage"], additionalProperties: false } },
+                    { name: "remote_delete_file", description: "Delete one freshly listed exact printer file after explicit confirmation. The list precheck is not atomic with deletion.", inputSchema: { type: "object", properties: { path: { type: "string", description: "Exact absolute printer file path, without wildcards or a trailing slash." }, kind: { type: "string", enum: ["model", "video", "timelapse"], description: "File category used for the fresh list precheck." }, storage: { type: "string", enum: ["", "internal", "external", "emmc", "udisk", "sdcard", "usb"], description: "Optional printer storage selector; empty selects the default." }, confirm: { type: "boolean", description: "Set true to authorize deleting this exact file." }, expected_size: { type: "integer", minimum: 0, description: "Optional expected file size in bytes for the fresh list precheck." } }, required: ["path", "kind", "confirm"], additionalProperties: false } },
+                    { name: "remote_archive_members", description: "List bounded member names in a checksum-verified printer ZIP or 3MF download.", inputSchema: { type: "object", properties: { path: { type: "string", description: "Absolute printer path of the ZIP or 3MF archive." }, offset: { type: "integer", minimum: 0, description: "Zero-based member offset; defaults to 0." }, limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum member names to return, from 1 to 100; defaults to 50." } }, required: ["path"], additionalProperties: false } },
+                    { name: "remote_archive_extract", description: "Extract one exact member of a verified printer archive into a workspace; this never starts a print.", inputSchema: { type: "object", properties: { path: { type: "string", description: "Absolute printer path of the ZIP or 3MF archive." }, member: { type: "string", description: "Exact member name returned by remote_archive_members." }, workspace_id: { type: "string", description: "Existing destination workspace ID." }, filename: { type: "string", description: "Safe destination filename within the workspace." } }, required: ["path", "member", "workspace_id", "filename"], additionalProperties: false } },
                     {
                         name: "camera_snapshot",
                         description: "Capture a single JPEG frame from the printer's chamber camera. A1/P1 use TCP-on-6000; X1/P2S/H2/X2D use RTSP via ffmpeg. Returns JPEG as base64; pass save_path to also write the bytes to disk.",
@@ -3040,8 +3149,8 @@ export class BambuPrinterMCPServer {
                                 },
                                 connection_mode: {
                                     type: "string",
-                                    enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "bambu_connect", "signed_mqtt"],
-                                    description: "Print path: signed_mqtt uses verified internal 3MF transfer followed by configured signed MQTT; bambu_connect hands a printable file to the signed-in Bambu Connect app for cloud-mode review; X2D otherwise defaults to bambu_native (Bambu Studio's installed local networking plug-in, storing the job on a ready SD card or USB stick, otherwise internal eMMC); X1C may opt in to bambu_native, for example when its firmware refuses FTPS uploads with 553; lan_mqtt_ftps is the legacy direct MQTT/FTPS path; bambu_network uses the FULU bridge."
+                                    enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "bambu_connect", "signed_mqtt", "signed_cloud"],
+                                    description: "Print path: signed_cloud explicitly creates an account project and dispatches a cloud task, with no automatic replay; signed_mqtt uses verified internal 3MF transfer followed by configured signed MQTT; bambu_connect hands a printable file to Bambu Connect for review; X2D otherwise defaults to bambu_native. lan_mqtt_ftps is direct MQTT/FTPS; bambu_network uses the FULU bridge."
                                 },
                                 try_emmc_print: { type: "boolean", description: "X2D native printing: true stores the job on internal storage (eMMC), false on the SD card or USB stick (refused unless the printer reports one ready). Omit to use the card when ready, else eMMC; X1C requires fresh advertised internal-printing support before using eMMC. BAMBU_NATIVE_TRY_EMMC_PRINT sets a server default." },
                                 connection_type: { type: "string", enum: ["cloud", "lan"], description: "BambuNetwork connection type when connection_mode is bambu_network; cloud uses restored internet printing, lan uses local bridge printing." },
@@ -3434,6 +3543,18 @@ export class BambuPrinterMCPServer {
         server.setRequestHandler(CallToolRequestSchema, (request, extra) => withRequestOwner(server, extra, () => withPrintDispatch(() => withExtractedSettingsCleanup(async () => {
             extra.signal.throwIfAborted();
             const { name, arguments: args } = request.params;
+            if (workspaceArtifactTools.some(tool => tool.name === name)) {
+                try {
+                    const result = await handleWorkspaceArtifactTool(name, args ?? {}, { signal: extra.signal });
+                    return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+                }
+                catch (error) {
+                    const failure = error instanceof WorkspaceArtifactError
+                        ? { code: error.code, message: error.message, next_action: error.next_action }
+                        : { code: "WORKSPACE_OPERATION_FAILED", message: "Workspace operation failed.", next_action: "Check workspace status before retrying." };
+                    return { isError: true, content: [{ type: "text", text: failure.message }], structuredContent: failure };
+                }
+            }
             const sendNativeCommand = (options, execution = {}) => {
                 if (!signedRequested())
                     return sendCommandWithBambuNative(options, { signal: extra.signal, ...execution });
@@ -3614,16 +3735,45 @@ export class BambuPrinterMCPServer {
                         });
                         break;
                     }
-                    case "account_status":
+                    case "account_status": {
                         if (args && Object.keys(args).length)
                             throw new Error("account_status does not accept arguments.");
-                        result = { ...await accountManager.status(), liveValidated: false, note: "Ready means a cached session exists and is not known to be expired; it has not been validated online." };
+                        const configured = [process.env.BAMBU_SIGNED_CLOUD_BROKER, process.env.BAMBU_SIGNED_CLOUD_USERNAME, process.env.BAMBU_SIGNED_CLOUD_TOKEN].filter(Boolean).length;
+                        const status = await accountManager.status();
+                        result = { ...status, configuredCredentialSource: configured === 3 ? "explicit" : configured === 0 ? "account_session" : "incomplete_explicit", configuredRefreshable: configured === 3 ? false : configured === 0 ? status.refreshState === "available" : null, liveValidated: false, note: "Ready means a cached session exists and is not known to be expired; it has not been validated online. Explicit configured cloud tokens take precedence and cannot be refreshed by this session." };
                         break;
+                    }
                     case "account_login": {
                         if (!args || Object.keys(args).some(key => key !== "region") || (args.region !== "global" && args.region !== "china"))
                             throw new Error("account_login requires only region: global or china.");
                         const login = await accountManager.beginInteractiveLogin({ region: args.region });
                         result = { url: login.url, expiresAt: login.expiresAt, note: "Open this temporary local URL in a browser to sign in. Enter credentials and verification codes only there." };
+                        break;
+                    }
+                    case "account_setup_signing": {
+                        if (!args || Object.keys(args).some(key => key !== "region" && key !== "method") || (args.region !== "global" && args.region !== "china") || (args.method !== undefined && !["automatic", "apk", "files"].includes(String(args.method))))
+                            throw new Error("account_setup_signing requires region and an optional supported source method.");
+                        if (process.env.BAMBU_SIGNING_BOOTSTRAP_ENABLED !== "true")
+                            throw new Error("Signing credential issuance is not enabled by the server operator.");
+                        const directory = process.env.BAMBU_SIGNING_DIR?.trim();
+                        const bootstrapFile = process.env.BAMBU_SIGNING_BOOTSTRAP_FILE?.trim();
+                        const wrappingCertificateFile = process.env.BAMBU_SIGNING_WRAPPING_CERTIFICATE_FILE?.trim();
+                        const sourceApk = process.env.BAMBU_SIGNING_SOURCE_APK?.trim();
+                        if (!directory)
+                            throw new Error("A private signing directory must be configured.");
+                        const method = args.method ?? (sourceApk || bootstrapFile || wrappingCertificateFile ? (sourceApk ? "apk" : "files") : "automatic");
+                        if ((method === "apk" && (!sourceApk || bootstrapFile || wrappingCertificateFile)) || (method === "files" && (!bootstrapFile || !wrappingCertificateFile || sourceApk)))
+                            throw new Error("The selected signing source is incomplete or conflicting.");
+                        const signal = AbortSignal.any([extra.signal, AbortSignal.timeout(600000)]);
+                        signal.throwIfAborted();
+                        const { provisionSigningCredentials, provisionSigningCredentialsFromApk, provisionSigningCredentialsFromOfficialPackage } = await import("./signing/bootstrap.js");
+                        const region = args.region === "china" ? "cn" : "global";
+                        if (method === "automatic")
+                            result = { status: "issued", ...await provisionSigningCredentialsFromOfficialPackage({ directory, region, signal }) };
+                        else if (method === "apk")
+                            result = { status: "issued", ...await provisionSigningCredentialsFromApk({ directory, apkFile: sourceApk, region, signal }) };
+                        else
+                            result = { status: "issued", ...await provisionSigningCredentials({ directory, bootstrapFile: bootstrapFile, wrappingCertificateFile: wrappingCertificateFile, region, signal }) };
                         break;
                     }
                     case "account_cancel_login":
@@ -3637,6 +3787,87 @@ export class BambuPrinterMCPServer {
                             throw new Error("account_list_printers does not accept arguments.");
                         result = { printers: await accountManager.listPrinters() };
                         break;
+                    case "account_list_filament_inventory":
+                        if (args && Object.keys(args).length)
+                            throw new Error("account_list_filament_inventory does not accept arguments.");
+                        result = await accountManager.listFilamentInventory(process.env, extra.signal);
+                        break;
+                    case "account_filament_manager":
+                        if (!args || Object.keys(args).some(key => key !== "operation" && key !== "payload") || typeof args.operation !== "string")
+                            throw new Error("account_filament_manager requires an operation and optional payload.");
+                        result = await accountManager.filamentAction(args.operation, args.payload, String(bambuSerial), process.env, extra.signal);
+                        break;
+                    case "account_cloud_print_history":
+                        if (args && Object.keys(args).some(key => key !== "offset" && key !== "limit"))
+                            throw new Error("account_cloud_print_history accepts only offset and limit.");
+                        result = await accountManager.cloudPrintHistoryPage(String(bambuSerial), { offset: args?.offset, limit: args?.limit }, process.env, extra.signal);
+                        break;
+                    case "account_cloud_print_thumbnail": {
+                        if (!args || Object.keys(args).some(key => key !== "task_id") || !(typeof args.task_id === "number" && Number.isSafeInteger(args.task_id) && args.task_id > 0 || typeof args.task_id === "string" && /^[1-9]\d{0,19}$/.test(args.task_id)))
+                            throw new Error("account_cloud_print_thumbnail requires a valid task_id.");
+                        const cover = await accountManager.cloudPrintHistoryCover(String(bambuSerial), args.task_id, process.env, extra.signal);
+                        return { content: [{ type: "text", text: JSON.stringify({ task_id: args.task_id, mimeType: cover.mimeType, bytes: cover.bytes.length }) }, { type: "image", data: cover.bytes.toString('base64'), mimeType: cover.mimeType }] };
+                    }
+                    case "account_reprint_cloud_task": {
+                        if (!args || Object.keys(args).some(key => key !== "task_id" && key !== "confirm_original_job_reference" && key !== "current_mapping") || args.confirm_original_job_reference !== true || !(typeof args.task_id === 'number' && Number.isSafeInteger(args.task_id) && args.task_id > 0 || typeof args.task_id === 'string' && /^[1-9]\d{0,19}$/.test(args.task_id)))
+                            throw new Error('A valid task_id and confirm_original_job_reference:true are required.');
+                        if (args.current_mapping !== undefined && (!Array.isArray(args.current_mapping) || args.current_mapping.length < 1 || args.current_mapping.length > 64 || args.current_mapping.some(row => !row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).sort().join(',') !== 'ams,amsId,filamentId,slotId' || !['filamentId', 'ams', 'amsId', 'slotId'].every(key => Number.isSafeInteger(row[key])))))
+                            throw new Error('Invalid current mapping.');
+                        if (!signedControlsRequested(process.env) || process.env.BAMBU_CLOUD_PRINT_ENABLED !== 'true')
+                            throw new Error('Completed-job reprint requires enabled signed controls and BAMBU_CLOUD_PRINT_ENABLED=true.');
+                        const account = await accountManager.beginCompletedJobAccount(bambuSerial, process.env, extra.signal);
+                        result = await withPrinterOperation(host, bambuSerial, async (assertActive) => {
+                            // This route needs only signing paths and renewal settings. The account
+                            // capability above already owns its credential and binding lifecycle.
+                            const configEnv = process.env.BAMBU_SIGNED_WRITE_TRANSPORT?.trim() === 'cloud' && !process.env.BAMBU_SIGNED_CLOUD_BROKER && !process.env.BAMBU_SIGNED_CLOUD_USERNAME && !process.env.BAMBU_SIGNED_CLOUD_TOKEN
+                                ? { ...process.env, BAMBU_SIGNED_CLOUD_BROKER: 'mqtts://placeholder.invalid', BAMBU_SIGNED_CLOUD_USERNAME: 'placeholder', BAMBU_SIGNED_CLOUD_TOKEN: 'placeholder' } : process.env;
+                            const signing = signedControlConfiguration(configEnv, host, bambuToken);
+                            if (!signing)
+                                throw new Error('Signed cloud configuration is unavailable.');
+                            const { handyClientHeaders, createHttpProof } = await import('./signing/http-proof.js');
+                            return executeReferenceReprint({ account, serial: bambuSerial, taskId: String(args.task_id), signal: extra.signal, assertActive, currentMapping: args.current_mapping,
+                                readStatus: () => this.bambu.getSafetyStatus(host, bambuSerial, bambuToken, { requireObservedSerial: true }),
+                                confirm: (status, reference) => this.bambu.confirmCompletedJobReferencePreflight(bambuSerial, status, { sourceTaskId: reference.sourceTaskId, model: reference.declared.deviceModel, nozzles: reference.declared.nozzleDiameters, materials: reference.declared.materials.map(m => `${m.type} (filament ${m.id}, nozzle ${m.nozzle}, tray ${reference.payload.amsMapping?.[m.id - 1]})`) }),
+                                assertPreflight: (status, preflight) => this.bambu.assertPrintPreflight(status, preflight),
+                                headers: async () => ({ ...await handyClientHeaders(signing.sequenceStore, process.env.BAMBU_HANDY_OS_VERSION?.trim() || ''), ...await createHttpProof(signing.operatorPemDirectory, undefined, signing.autoRenew) }),
+                                prepareHandoff: () => markReferenceUnknown(bambuSerial), discardHandoff: nonce => discardUnsentReferenceHold(bambuSerial, nonce), onDispatch: () => markPrintCommandSent(), onAccepted: id => bindReferenceTask(bambuSerial, id) });
+                        }, true);
+                        break;
+                    }
+                    case "account_reprint_hold": {
+                        if (!args || Object.keys(args).some(key => key !== 'action' && key !== 'acknowledge_review') || !['status', 'observe', 'recover'].includes(String(args.action)))
+                            throw new Error('Choose status, observe, or recover.');
+                        if (args.action === 'recover' && args.acknowledge_review !== true)
+                            throw new Error('Explicit acknowledgment of printer and history review is required.');
+                        const recoveryAccount = args.action === 'recover' ? await accountManager.beginCompletedJobAccount(bambuSerial, process.env, extra.signal) : undefined;
+                        const hold = await inspectReferenceHold(bambuSerial);
+                        if (args.action === 'status') {
+                            result = { state: hold.state, ...(hold.taskId ? { taskId: hold.taskId } : {}) };
+                            break;
+                        }
+                        if (hold.state === 'none') {
+                            result = { state: 'none' };
+                            break;
+                        }
+                        if (args.action === 'observe') {
+                            const status = await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken, { requireObservedSerial: true });
+                            result = { state: await observeReferenceHold(bambuSerial, status), ...(hold.taskId ? { taskId: hold.taskId } : {}) };
+                            break;
+                        }
+                        if (!hold.nonce || !recoveryAccount)
+                            throw new Error('Explicit acknowledgment of printer and history review is required.');
+                        await recoveryAccount.assertCurrent(true);
+                        await this.bambu.confirmHardwareAction(`Clear the durable reference-print hold for ${bambuSerial}? Inspect the printer and account history, resolve any unknown or still-active job, and confirm the bed and printer are safe. This does not send a printer command.`, true);
+                        const status = await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken, { requireObservedSerial: true });
+                        const model = normalizeModel(status?.model ?? status?.raw?.model);
+                        if (!model)
+                            throw new Error('Fresh printer model is unavailable.');
+                        validatePrinterState(status, { model, nozzleDiameters: [], verifyMaterials: false });
+                        extra.signal.throwIfAborted();
+                        await clearReferenceHold(bambuSerial, hold.nonce, async (removeHold) => recoveryAccount.withLockedAuthority(() => { recoveryAccount.assertGenerationCurrent(); extra.signal.throwIfAborted(); validatePrinterState(status, { model, nozzleDiameters: [], verifyMaterials: false }); removeHold(); }), extra.signal);
+                        result = { state: 'cleared', recovery: 'human_confirmed' };
+                        break;
+                    }
                     case "account_logout":
                         if (args && Object.keys(args).length)
                             throw new Error("account_logout does not accept arguments.");
@@ -3662,17 +3893,47 @@ export class BambuPrinterMCPServer {
                         });
                         break;
                     case "get_printer_status":
+                        if (args?.detail !== undefined && args.detail !== "compact" && args.detail !== "full")
+                            throw new Error("detail must be compact or full.");
                         if (args?.fresh !== undefined && typeof args.fresh !== "boolean")
                             throw new Error("fresh must be a boolean.");
                         result = args?.fresh === true
                             ? await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken, { requireObservedSerial: true })
                             : await this.bambu.getStatus(host, bambuSerial, bambuToken);
+                        if (args?.detail !== "full")
+                            result = compactPrinterStatus(result, args?.fresh === true);
                         break;
                     case "get_printer_filaments": {
                         const requestedModel = (String(args?.bambu_model ?? DEFAULT_BAMBU_MODEL ?? "")).trim().toLowerCase();
                         const normalizedModel = requestedModel ? validateBambuModel(requestedModel) : undefined;
                         const nozzleDiam = String(args?.nozzle_diameter || DEFAULT_NOZZLE_DIAMETER);
-                        result = await this.getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, normalizedModel, nozzleDiam);
+                        result = await this.getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, normalizedModel, nozzleDiam, true);
+                        break;
+                    }
+                    case "get_filament_inventory": {
+                        if (args?.include_library !== undefined && typeof args.include_library !== "boolean")
+                            throw new Error("include_library must be a boolean.");
+                        const requestedModel = String(args?.bambu_model ?? DEFAULT_BAMBU_MODEL ?? "").trim().toLowerCase();
+                        const normalizedModel = requestedModel ? validateBambuModel(requestedModel) : undefined;
+                        const loaded = await this.getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, normalizedModel, String(args?.nozzle_diameter || DEFAULT_NOZZLE_DIAMETER), true);
+                        extra.signal.throwIfAborted();
+                        let library = { status: "not_requested" };
+                        let matches = null;
+                        let cloudSnapshot = null;
+                        if (args?.include_library !== false) {
+                            try {
+                                const snapshot = await accountManager.listFilamentInventory(process.env, extra.signal);
+                                cloudSnapshot = snapshot;
+                                matches = matchFilamentLibrary(snapshot.spools, loaded.trays);
+                                library = { status: "available", ...snapshot };
+                            }
+                            catch {
+                                extra.signal.throwIfAborted();
+                                // The source may be unavailable or incomplete; never leak cloud response or credentials.
+                                library = { status: "unavailable", reason: "Account library retrieval could not be completed. Check account configuration and connectivity." };
+                            }
+                        }
+                        result = { ...unifyFilamentInventory(cloudSnapshot, loaded.trays), printer: loaded, library, matches, note: "Printer reports can be cached or incomplete; no match or an absent tray does not prove a reel is unloaded. Cloud weights are reported values, not physical measurements." };
                         break;
                     }
                     case "resolve_3mf_ams_slots": {
@@ -3785,6 +4046,127 @@ export class BambuPrinterMCPServer {
                     case "camera_stream_stop":
                         result = this.bambu.cameraStreamStop(host, bambuSerial);
                         break;
+                    case "remote_camera_snapshot":
+                    case "remote_list_files":
+                    case "remote_download_file":
+                    case "remote_upload_file":
+                    case "remote_delete_file":
+                    case "remote_archive_members":
+                    case "remote_archive_extract": {
+                        const fields = { remote_camera_snapshot: [], remote_list_files: ['kind', 'storage'], remote_download_file: ['path', 'workspace_id', 'filename'], remote_upload_file: ['workspace_id', 'artifact_id', 'storage', 'allow_history_rotation'], remote_delete_file: ['path', 'kind', 'storage', 'confirm', 'expected_size'], remote_archive_members: ['path', 'offset', 'limit'], remote_archive_extract: ['path', 'member', 'workspace_id', 'filename'] };
+                        if (args && Object.keys(args).some(key => !fields[name].includes(key)))
+                            throw new Error('Invalid remote operation arguments.');
+                        if (process.env.BAMBU_TUTK_ENABLED !== 'true')
+                            throw new Error('Remote camera and file transport is not enabled by the server operator.');
+                        const signingDirectory = process.env.BAMBU_SIGNING_DIR?.trim(), stateDirectory = process.env.BAMBU_SIGNING_STATE_DIR?.trim(), osVersion = process.env.BAMBU_HANDY_OS_VERSION?.trim(), lockFile = process.env.BAMBU_TUTK_OPERATION_LOCK_FILE?.trim();
+                        if (!signingDirectory || !stateDirectory || !osVersion || !lockFile)
+                            throw new Error('Remote camera and file transport is not fully configured.');
+                        const { runTutkOperation, runRemoteArchive } = await import('./tutk.js');
+                        const { MutationFailure } = await import('./tutk-direct/mutations.js');
+                        const { createHttpProof, httpProofRenewalConfiguration } = await import('./signing/http-proof.js');
+                        const autoRenew = httpProofRenewalConfiguration(process.env, signingDirectory);
+                        const base = { serial: bambuSerial, signingDirectory, stateDirectory, osVersion, lockFile, signal: extra.signal };
+                        let boundCredentials;
+                        const deps = { credentials: async (serial) => { boundCredentials ?? (boundCredentials = await accountManager.getConfiguredCloudMqttCredentials(serial, process.env, extra.signal)); await boundCredentials.assertCurrent(); boundCredentials.assertGenerationCurrent(); return boundCredentials; }, proof: (directory) => createHttpProof(directory, undefined, autoRenew) };
+                        const validPath = (value) => typeof value === 'string' && value.startsWith('/') && value.length <= 1024 && !/[\x00-\x1f\x7f]/.test(value) && !value.split('/').some(p => p === '..' || p === '.');
+                        const validWorkspace = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value);
+                        const validFilename = (value) => typeof value === 'string' && value.length <= 200 && /^(?:[^/\\\x00-\x1f]+\.(stl|3mf|step|stp|obj|amf|svg|gcode|png|jpe?g|webp|mp4|mov|xml|json|config|txt|rels|model)|\.rels)$/i.test(value);
+                        const listOperation = () => { if (typeof args?.kind !== 'string' || !['model', 'video', 'timelapse'].includes(args.kind) || (args.storage !== undefined && (typeof args.storage !== 'string' || !['', 'internal', 'external', 'emmc', 'udisk', 'sdcard', 'usb'].includes(args.storage))))
+                            throw new Error('Invalid remote file selector.'); return { operation: 'list', kind: args.kind, storage: (args.storage ?? '') }; };
+                        const publish = async (bytes, workspace_id, filename) => { const sha256 = createHash('sha256').update(bytes).digest('hex'); const upload = await handleWorkspaceArtifactTool('workspace_upload_begin', { workspace_id, filename, size_bytes: bytes.length, sha256 }, { signal: extra.signal }); const upload_id = String(upload.upload_id); try {
+                            for (let offset = 0; offset < bytes.length; offset += 512 * 1024)
+                                await handleWorkspaceArtifactTool('workspace_upload_chunk', { workspace_id, upload_id, offset, data_base64: bytes.subarray(offset, offset + 512 * 1024).toString('base64') }, { signal: extra.signal });
+                            return await handleWorkspaceArtifactTool('workspace_upload_finish', { workspace_id, upload_id }, { signal: extra.signal, assertAuthority: async () => { if (!boundCredentials)
+                                    throw new Error('Remote authority unavailable.'); await boundCredentials.assertCurrent(); boundCredentials.assertGenerationCurrent(); if (extra.signal.aborted)
+                                    throw new Error('Remote operation cancelled.'); } });
+                        }
+                        catch (error) {
+                            await handleWorkspaceArtifactTool('workspace_upload_abort', { workspace_id, upload_id }).catch(() => { });
+                            throw error;
+                        } };
+                        if (name === 'remote_archive_members' || name === 'remote_archive_extract') {
+                            if (!validPath(args?.path))
+                                throw new Error('Invalid remote file path.');
+                            if (name === 'remote_archive_members') {
+                                const offset = args?.offset ?? 0, limit = args?.limit ?? 50;
+                                if (!Number.isSafeInteger(offset) || Number(offset) < 0 || !Number.isSafeInteger(limit) || Number(limit) < 1 || Number(limit) > 100)
+                                    throw new Error('Invalid archive page.');
+                                const archive = await runRemoteArchive({ ...base, path: args.path }, deps);
+                                const at = Number(offset), end = Math.min(archive.entries.length, at + Number(limit));
+                                result = { members: archive.entries.slice(at, end), total: archive.entries.length, next_offset: end < archive.entries.length ? end : null };
+                                break;
+                            }
+                            if (typeof args?.member !== 'string' || !validWorkspace(args.workspace_id) || !validFilename(args.filename))
+                                throw new Error('Invalid archive destination.');
+                            await handleWorkspaceArtifactTool('workspace_status', { workspace_id: args.workspace_id }, { signal: extra.signal });
+                            const archive = await runRemoteArchive({ ...base, path: args.path, member: args.member }, deps);
+                            if (!archive.bytes)
+                                throw new Error('Archive member unavailable.');
+                            result = await publish(archive.bytes, args.workspace_id, args.filename);
+                            break;
+                        }
+                        let operation;
+                        if (name === 'remote_camera_snapshot')
+                            operation = { operation: 'camera' };
+                        else if (name === 'remote_list_files')
+                            operation = listOperation();
+                        else if (name === 'remote_upload_file') {
+                            if (!validWorkspace(args?.workspace_id) || typeof args?.artifact_id !== 'string' || args.storage !== 'emmc' || args.allow_history_rotation !== true)
+                                throw new Error('Upload requires internal eMMC and explicit history rotation consent; external storage is not yet supported.');
+                            const info = await handleWorkspaceArtifactTool('workspace_artifact_info', { workspace_id: args.workspace_id, artifact_id: args.artifact_id }, { signal: extra.signal });
+                            const size = Number(info.size_bytes);
+                            if (!Number.isSafeInteger(size) || size < 1 || size > 16 * 1024 * 1024 || typeof info.sha256 !== 'string' || typeof info.filename !== 'string')
+                                throw new Error('Invalid or oversized source artifact.');
+                            const chunks = [];
+                            for (let offset = 0; offset < size; offset += 256 * 1024) {
+                                const part = await handleWorkspaceArtifactTool('workspace_artifact_read', { workspace_id: args.workspace_id, artifact_id: args.artifact_id, offset, length: Math.min(256 * 1024, size - offset) }, { signal: extra.signal });
+                                if (typeof part.data_base64 !== 'string')
+                                    throw new Error('Artifact read failed.');
+                                chunks.push(Buffer.from(part.data_base64, 'base64'));
+                            }
+                            const bytes = Buffer.concat(chunks);
+                            if (bytes.length !== size || createHash('sha256').update(bytes).digest('hex') !== info.sha256)
+                                throw new Error('Artifact changed during read.');
+                            operation = { operation: 'upload', bytes, name: info.filename, storage: 'emmc', allowHistoryRotation: true };
+                        }
+                        else if (name === 'remote_delete_file') {
+                            if (!validPath(args?.path) || /[\*?\[\]]/.test(args.path) || args.path.endsWith('/') || args.confirm !== true || (args.expected_size !== undefined && (!Number.isSafeInteger(args.expected_size) || Number(args.expected_size) < 0)))
+                                throw new Error('Deletion requires an exact path and explicit confirmation.');
+                            const selected = listOperation();
+                            operation = { operation: 'delete', path: args.path, confirm: true, kind: selected.kind, storage: selected.storage, ...(args.expected_size !== undefined ? { expectedSize: Number(args.expected_size) } : {}) };
+                        }
+                        else {
+                            if (!validPath(args?.path) || !validWorkspace(args.workspace_id) || !validFilename(args.filename))
+                                throw new Error('Invalid remote download destination.');
+                            await handleWorkspaceArtifactTool('workspace_status', { workspace_id: args.workspace_id }, { signal: extra.signal });
+                            operation = { operation: 'download', path: args.path };
+                        }
+                        let remote;
+                        try {
+                            remote = await runTutkOperation({ ...base, operation }, deps);
+                        }
+                        catch (error) {
+                            if (error instanceof MutationFailure) {
+                                result = { receipt: error.receipt };
+                                break;
+                            }
+                            throw error;
+                        }
+                        if (remote.kind === 'camera' && operation.operation === 'camera')
+                            return { content: [{ type: 'image', data: remote.jpeg.toString('base64'), mimeType: 'image/jpeg' }] };
+                        if (remote.kind === 'list' && operation.operation === 'list') {
+                            result = { files: remote.files };
+                            break;
+                        }
+                        if (remote.kind === 'upload' || remote.kind === 'delete') {
+                            result = remote;
+                            break;
+                        }
+                        if (remote.kind !== 'download' || operation.operation !== 'download' || !validWorkspace(args?.workspace_id) || !validFilename(args.filename))
+                            throw new Error('Unexpected remote operation response.');
+                        result = { ...await publish(remote.bytes, args.workspace_id, args.filename), printer_md5: remote.md5 };
+                        break;
+                    }
                     case "camera_snapshot": {
                         const snapshotModel = args?.bambu_model ?? process.env.BAMBU_MODEL ?? process.env.BAMBU_PRINTER_MODEL;
                         result = await this.bambu.cameraSnapshot(host, bambuSerial, bambuToken, {
@@ -4398,6 +4780,10 @@ export class BambuPrinterMCPServer {
                             result = await this.print3mfViaBambuNetwork({ ...resolvedArgs, connection_type: "lan", bambu_network_method: "start_local_print" }, host, bambuSerial, bambuToken, { signal: extra.signal, signed: true });
                             break;
                         }
+                        if (effectiveConnectionMode === "signed_cloud") {
+                            result = await this.print3mfViaBambuNetwork({ ...resolvedArgs, connection_type: "lan", bambu_network_method: "start_local_print" }, host, bambuSerial, bambuToken, { signal: extra.signal, cloud: true });
+                            break;
+                        }
                         if (effectiveConnectionMode === "bambu_native") {
                             result = await this.print3mfViaBambuNative(resolvedArgs, host, bambuSerial, bambuToken, reportNativeUpdate, extra.signal);
                             break;
@@ -4788,6 +5174,9 @@ export class BambuPrinterMCPServer {
                 const textResult = name === "camera_frame" && result && typeof result === "object"
                     ? Object.fromEntries(Object.entries(result).filter(([key]) => key !== "base64")) : result;
                 const text = typeof textResult === "string" ? textResult : JSON.stringify(textResult, null, 2);
+                // Compact status uses one JSON text block for both structured-aware and text-only clients.
+                if (name === "get_printer_status" && args?.detail !== "full")
+                    return { content: [{ type: "text", text }] };
                 // A declared outputSchema obliges structuredContent whatever MCP_HTTP_JSON_RESPONSE says.
                 if ((this.runtimeConfig.enableJsonResponse || OUTPUT_SCHEMA_TOOLS.has(name)) && typeof result === "object") {
                     return {
@@ -4824,8 +5213,9 @@ export class BambuPrinterMCPServer {
                     ...(error instanceof NativeOperationError ? { native_diagnostics: error.diagnostics } : {}),
                     ...(error instanceof VerifiedUploadDispatchError ? { verified_upload: error.upload } : {}),
                     ...(error instanceof MediaTransferError ? { transfer_diagnostics: { stage: error.stage, reason: error.reason, uploadMayExist: error.uploadMayExist } } : {}),
+                    ...(error instanceof ReferenceDispatchUnknown ? { reference_receipt: error.receipt } : {}),
                     ...(error instanceof PrinterMqttConnectionError ? { connection_diagnostics: error.diagnostics, ...(error.safetyStage ? { safety_stage: error.safetyStage } : {}) } : {}),
-                    ...(error instanceof PrinterRefusal ? { code: error.code } : error instanceof NativeOperationError && error.refusalCode ? { code: error.refusalCode } : {}), ...(["print_3mf", "upload_gcode"].includes(name) ? { printOutcome: printOutcome(error) } : {}),
+                    ...(error instanceof PrinterRefusal ? { code: error.code } : error instanceof NativeOperationError && error.refusalCode ? { code: error.refusalCode } : {}), ...(["print_3mf", "upload_gcode", "account_reprint_cloud_task"].includes(name) ? { printOutcome: printOutcome(error) } : {}),
                     // The slicer's own result.json; the message starts with its error_string and warnings.
                     // A slicer failure always carries slicer_report: the plain sentence a person sees, the slicer's words for the log.
                     // The report always says failed (a result.json that says success can still leave no output file).

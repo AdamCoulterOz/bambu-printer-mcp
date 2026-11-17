@@ -95,8 +95,8 @@ test("MCP fresh status is additive, strictly boolean, read-only and delegates to
   const tool = (await client.listTools()).tools.find(value => value.name === "get_printer_status");
   assert.equal(tool.inputSchema.properties.fresh.type, "boolean");
   assert.equal(tool.annotations.readOnlyHint, true); assert.equal(tool.annotations.destructiveHint, false); assert.equal(tool.annotations.openWorldHint, true);
-  for (const args of [{}, {fresh: false}]) assert.deepEqual((await client.callTool({name: "get_printer_status", arguments: args})).structuredContent, displayed);
-  const result = await client.callTool({name: "get_printer_status", arguments: {fresh: true}});
+  for (const args of [{detail: "full"}, {fresh: false, detail: "full"}]) assert.deepEqual((await client.callTool({name: "get_printer_status", arguments: args})).structuredContent, displayed);
+  const result = await client.callTool({name: "get_printer_status", arguments: {fresh: true, detail: "full"}});
   assert.deepEqual(result.structuredContent, observed);
   assert.equal(owner.bambu, backend);
   assert.deepEqual(calls.map(value => value[0]), ["display", "display", "fresh"]);
@@ -114,4 +114,70 @@ test("MCP fresh status is additive, strictly boolean, read-only and delegates to
   assert.equal(calls.length, 3, "fresh failures must never fall back to display status");
   assert.match(getAgentGuideResource("bambu://workflow/status"), /fresh:true/);
   assert.match(getAgentGuideResource("bambu://workflow/status"), /does not authorize dispatch/);
+});
+
+test('compact status defaults are bounded, source-aware and exclude private telemetry', async t => {
+  const directory = trackedMkdtempSync(path.join(os.tmpdir(), 'mcp-compact-status-'));
+  const previousCwd = process.cwd(), previousEnv = {...process.env};
+  process.chdir(directory);
+  Object.assign(process.env, {BAMBU_PRINTER_HOST:'synthetic.invalid', BAMBU_PRINTER_SERIAL:serial, BAMBU_PRINTER_ACCESS_TOKEN:'TEST', BAMBU_MODEL:'', BAMBU_PRINTER_MODEL:'', CAD_ENABLED:'0', TEMP_DIR:directory});
+  const {BambuPrinterMCPServer} = await import('../dist/index.js');
+  const owner = new BambuPrinterMCPServer();
+  const raw = {gcode_state:'RUNNING', mc_percent:48, mc_remaining_time:73, layer_num:120, total_layer_num:250,
+    nozzle_temper:201, nozzle_target_temper:220, bed_temper:60, bed_target_temper:60,
+    print_error:0, hms:[{attr:1, code:2}], secret_token:'SENTINEL_SECRET', ipcam:{url:'https://private.invalid/stream'},
+    ams:{ams:[{id:'0',tray:[{id:'1',tray_type:'PLA',tray_color:'FFFFFFFF',remain:42,tag_uid:'PRIVATE_TAG'}]}]},
+    vir_slot:[{id:'254',tray_type:'PETG',tray_color:'112233FF'}], padding:'x'.repeat(25000)};
+  const display={connected:true,status:'RUNNING',model:'X2D',serial,raw,ams:raw.ams};
+  const fresh={...display, observedSerial:serial, observation:{source:'mqtt',requestedAt:100,receivedAt:101,identitySource:'module-serial'}};
+  let displayCalls=0, freshCalls=0;
+  owner.bambu.getStatus=async()=>{displayCalls++;return display};
+  owner.bambu.getSafetyStatus=async()=>{freshCalls++;return fresh};
+  const [clientTransport, serverTransport]=InMemoryTransport.createLinkedPair();
+  const client=new Client({name:'compact-status-test',version:'1'});
+  t.after(async()=>{await client.close();await owner.server.close();process.chdir(previousCwd); for(const key of Object.keys(process.env)) if(!(key in previousEnv)) delete process.env[key];Object.assign(process.env,previousEnv);fs.rmSync(directory,{recursive:true,force:true});});
+  await owner.server.connect(serverTransport);await client.connect(clientTransport);
+  const tool=(await client.listTools()).tools.find(x=>x.name==='get_printer_status');
+  assert.deepEqual(tool.inputSchema.properties.detail.enum,['compact','full']);
+  const full=await client.callTool({name:'get_printer_status',arguments:{detail:'full'}});
+  assert.deepEqual(full.structuredContent,display);
+  const defaultDisplay=await client.callTool({name:'get_printer_status',arguments:{}});
+  const compact=await client.callTool({name:'get_printer_status',arguments:{detail:'compact'}});
+  assert.equal(compact.structuredContent,undefined);
+  const value=JSON.parse(compact.content[0].text);
+  assert.deepEqual(defaultDisplay,compact);
+  assert.equal(value.freshness,'not_guaranteed');assert.equal(value.observation,null);
+  assert.deepEqual(value.progress,{percent:48,remaining_minutes:73,layer:120,total_layers:250});
+  assert.equal(value.slots.length,2);assert.equal(value.slots[0].remaining_percent,42);
+  assert.deepEqual(value.errors,{print_error:0,hms:['0000000100000002'],hms_truncated:false});
+  assert.equal(value.temperatures.nozzle.actual,201);assert.equal(value.temperatures.bed.target,60);
+  assert.doesNotMatch(JSON.stringify(compact),/SENTINEL_SECRET|private\.invalid|PRIVATE_TAG|x{100}/);
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(display).length / 10);
+  assert.equal(value.detail,'compact');
+  const verified=await client.callTool({name:'get_printer_status',arguments:{fresh:true,detail:'compact'}});
+  const freshValue=JSON.parse(verified.content[0].text);
+  const defaultFresh=await client.callTool({name:'get_printer_status',arguments:{fresh:true}});
+  assert.deepEqual(defaultFresh,verified);
+  assert.equal(freshValue.freshness,'fresh_mqtt');
+  assert.equal(freshValue.observation.identity_verified,true);
+  assert.equal(freshValue.observation.identity_source,'module-serial');
+  assert.doesNotMatch(JSON.stringify(verified),new RegExp(serial));
+  const invalid=await client.callTool({name:'get_printer_status',arguments:{detail:'short'}});
+  assert.equal(invalid.isError,true);assert.equal(displayCalls,3);assert.equal(freshCalls,2);
+  owner.runtimeConfig.enableJsonResponse=false;
+  const textOnly=await client.callTool({name:'get_printer_status',arguments:{detail:'compact'}});
+  assert.equal(textOnly.structuredContent,undefined);assert.equal(JSON.parse(textOnly.content[0].text).progress.percent,48);
+});
+
+test('compact view never invents fresh evidence, temperatures or empty errors from sparse reports', async () => {
+  const {compactPrinterStatus}=await import('../dist/printers/compact-status.js');
+  const sparse=compactPrinterStatus({connected:true,status:'UNKNOWN',model:'X2D',observation:{source:'mqtt'}},true);
+  assert.equal(sparse.freshness,'not_guaranteed');assert.equal(sparse.observation,null);
+  assert.equal(sparse.progress.percent,null);assert.equal(sparse.temperatures.nozzle.actual,null);
+  assert.equal(sparse.errors.hms,null);assert.equal(sparse.errors.print_error,null);
+  const packed=compactPrinterStatus({connected:true,status:'RUNNING',raw:{device:{extruder:{state:16,info:[{id:1,temp:(220*65536)+195}]},ctc:{info:{temp:(50*65536)+38}}}}},false);
+  assert.deepEqual(packed.temperatures.nozzle,{actual:195,target:220});assert.equal(packed.temperatures.chamber,38);
+  const dual=compactPrinterStatus({connected:true,status:'RUNNING',model:'X2D',raw:{device:{extruder:{state:0,info:[{id:0,temp:220*65536+200},{id:1,temp:210*65536+190}]}}}},false);
+  assert.deepEqual(dual.temperatures.nozzles,[{index:0,position:'right',actual:200,target:220},{index:1,position:'left',actual:190,target:210}]);
+  assert.equal(compactPrinterStatus({connected:false,status:'error'},false).state,'ERROR');
 });

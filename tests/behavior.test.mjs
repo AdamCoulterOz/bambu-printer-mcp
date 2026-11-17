@@ -606,6 +606,7 @@ test("printer model safety: schema requires bambu_model, rejects missing/invalid
   assert.deepEqual(
     toolsWithModel,
     [
+      "get_filament_inventory",
       "get_printer_filaments",
       "inspect_print_file",
       "print_3mf",

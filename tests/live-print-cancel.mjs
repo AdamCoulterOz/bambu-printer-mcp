@@ -70,7 +70,7 @@ try {
   console.log("[2/5] Getting printer status...");
   const status = await client.callTool({
     name: "get_printer_status",
-    arguments: {},
+    arguments: { detail: "full" },
   });
   const statusText = status.content?.[0]?.text || "";
   const statusData = JSON.parse(statusText);

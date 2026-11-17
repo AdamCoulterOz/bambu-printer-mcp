@@ -64,6 +64,7 @@ export declare function signedControlConfiguration(env: NodeJS.ProcessEnv, host:
         assertCurrent(): Promise<void>;
         assertGenerationCurrent(): void;
     };
+    autoRenew?: import('./signing/bootstrap.js').AutoRenewSigningOptions;
 };
 export declare function sendSignedControl(config: NonNullable<ReturnType<typeof signedControlConfiguration>>, serial: string, command: CommandInput, signal?: AbortSignal, beforePublish?: () => Promise<void>, assertActive?: () => void, onPublish?: () => void): Promise<void>;
 export declare function sendTypedLight(config: NonNullable<ReturnType<typeof signedControlConfiguration>>, serial: string, light: string, mode: string, signal?: AbortSignal): Promise<void>;

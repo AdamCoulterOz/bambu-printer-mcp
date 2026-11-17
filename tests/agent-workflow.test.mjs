@@ -94,9 +94,20 @@ test("MCP exposes workflow and successful structured blocked readiness without s
   }
   const signingGuide = await client.callTool({name: "get_agent_guide", arguments: {topic: "signing"}});
   const signingFields = signingGuide.structuredContent.configuration_fields;
-  const expectedSigningEnv = ["BAMBU_PRINTER_TLS_CA_FILE", "BAMBU_SIGNED_CONTROLS", "BAMBU_SIGNED_WRITE_TRANSPORT", "BAMBU_SIGNING_DIR", "BAMBU_SIGNING_DEVICE_CA_FILE", "BAMBU_SIGNING_STATE_DIR", "BAMBU_SIGNED_LOCAL_TLS_CA_FILE", "BAMBU_SIGNED_LOCAL_TLS_SERVERNAME", "BAMBU_SIGNED_CLOUD_BROKER", "BAMBU_SIGNED_CLOUD_USERNAME", "BAMBU_SIGNED_CLOUD_TOKEN", "BAMBU_SIGNED_CLOUD_AUTH"];
+  const expectedSigningEnv = ["BAMBU_SIGNING_BOOTSTRAP_ENABLED", "BAMBU_SIGNING_SOURCE_APK", "BAMBU_SIGNING_BOOTSTRAP_FILE", "BAMBU_SIGNING_WRAPPING_CERTIFICATE_FILE", "BAMBU_SIGNING_AUTO_RENEW", "BAMBU_SIGNING_REGION", "BAMBU_PRINTER_TLS_CA_FILE", "BAMBU_SIGNED_CONTROLS", "BAMBU_SIGNED_WRITE_TRANSPORT", "BAMBU_SIGNING_DIR", "BAMBU_SIGNING_DEVICE_CA_FILE", "BAMBU_SIGNING_STATE_DIR", "BAMBU_SIGNED_LOCAL_TLS_CA_FILE", "BAMBU_SIGNED_LOCAL_TLS_SERVERNAME", "BAMBU_SIGNED_CLOUD_BROKER", "BAMBU_SIGNED_CLOUD_USERNAME", "BAMBU_SIGNED_CLOUD_TOKEN", "BAMBU_SIGNED_CLOUD_AUTH"];
   assert.deepEqual(signingFields.map(field => field.env).sort(), expectedSigningEnv.sort());
   assert.equal(signingFields.find(field => field.env === "BAMBU_SIGNED_CLOUD_TOKEN").input, "secret");
+  assert.match(signingGuide.structuredContent.text, /account_setup_signing/);
+  assert.match(signingGuide.structuredContent.text, /managed automatic on-demand renewal/);
+  const dispatchGuide = await client.callTool({name: "get_agent_guide", arguments: {topic: "dispatch"}});
+  assert.match(dispatchGuide.structuredContent.text, /single task POST/);
+  assert.match(dispatchGuide.structuredContent.text, /never retry automatically/);
+  const cameraGuide = await client.callTool({name: "get_agent_guide", arguments: {topic: "camera"}});
+  for (const name of ["remote_camera_snapshot", "remote_list_files", "remote_download_file", "remote_upload_file", "remote_delete_file", "remote_archive_members", "remote_archive_extract"]) assert.ok(cameraGuide.structuredContent.text.includes(name));
+  for (const field of ["BAMBU_TUTK_ENABLED", "BAMBU_SIGNING_DIR", "BAMBU_SIGNING_STATE_DIR", "BAMBU_HANDY_OS_VERSION", "BAMBU_TUTK_OPERATION_LOCK_FILE", "ffmpeg"]) assert.ok(cameraGuide.structuredContent.text.includes(field));
+  assert.doesNotMatch(cameraGuide.structuredContent.text, /BAMBU_TUTK_HELPER_(URL|TOKEN_FILE)/);
+  assert.match(cameraGuide.structuredContent.text, /offline fixture coverage/);
+  assert.match(cameraGuide.structuredContent.text, /data only, not print authorization/);
   assert.match(signingGuide.structuredContent.text, /bambu-printer-mcp-signing-setup --repair/);
   assert.match(signingGuide.structuredContent.text, /Reservations coordinate only processes sharing that directory/);
   assert.match(signingGuide.structuredContent.text, /not a fallback after signing fails/);
@@ -104,7 +115,7 @@ test("MCP exposes workflow and successful structured blocked readiness without s
   assert.match(setupGuide.structuredContent.text, /counterpart_setup_fields/);
   assert.ok(listed.tools.find(({name}) => name === "counterpart_setup_fields")?.inputSchema);
   const resources = (await client.listResources()).resources;
-  const guides = ["index", "setup", "account", "signing", "status", "camera", "design", "slicing", "dispatch", "controls"];
+  const guides = ["index", "setup", "account", "signing", "status", "camera", "design", "slicing", "dispatch", "controls", "files"];
   const guideTexts = [];
   for (const guide of guides) {
     const uri = `bambu://workflow/${guide}`;

@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { withPrintStartGuard } from "./reference-hold.js";
 // Serialise mutations from this server for a printer. Stop/cancel remain available.
 const operations = new Map();
 const generations = new Map();
@@ -19,7 +20,7 @@ process.once("exit", () => {
         catch { /* OS temp cleanup remains available. */ }
     }
 });
-export async function withPrinterOperation(_host, serial, operation) {
+export async function withPrinterOperation(_host, serial, operation, printStart = false) {
     const key = serial;
     const generation = generations.get(key) ?? 0;
     const assertActive = () => {
@@ -28,7 +29,7 @@ export async function withPrinterOperation(_host, serial, operation) {
             throw new Error("Pending printer operation cancelled by stop or heater-off request.");
     };
     const previous = operations.get(key) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => { assertActive(); return operation(assertActive); });
+    const next = previous.catch(() => undefined).then(() => { assertActive(); return printStart ? withPrintStartGuard(serial, () => { assertActive(); return operation(assertActive); }) : operation(assertActive); });
     operations.set(key, next);
     try {
         return await next;

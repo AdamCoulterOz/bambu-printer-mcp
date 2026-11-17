@@ -170,6 +170,16 @@ export function signedControlConfiguration(env, host, lanToken) {
     const sequenceStore = env.BAMBU_SIGNING_STATE_DIR?.trim();
     if (!operatorPemDirectory || !deviceCaFile || !sequenceStore || ![operatorPemDirectory, deviceCaFile, sequenceStore].every(isAbsolute))
         throw new Error('Signed control requires absolute paths for its signing directory, device CA file and initialized private state directory.');
+    const auto = env.BAMBU_SIGNING_AUTO_RENEW?.trim();
+    if (auto && auto !== 'true' && auto !== 'false')
+        throw new Error('BAMBU_SIGNING_AUTO_RENEW must be true or false.');
+    let autoRenew;
+    if (auto === 'true') {
+        const bootstrapFile = env.BAMBU_SIGNING_BOOTSTRAP_FILE?.trim(), wrappingCertificateFile = env.BAMBU_SIGNING_WRAPPING_CERTIFICATE_FILE?.trim(), region = env.BAMBU_SIGNING_REGION?.trim();
+        if (Boolean(bootstrapFile) !== Boolean(wrappingCertificateFile) || (bootstrapFile && !isAbsolute(bootstrapFile)) || (wrappingCertificateFile && !isAbsolute(wrappingCertificateFile)) || (region !== 'global' && region !== 'cn'))
+            throw new Error('Automatic signing renewal requires an explicit global or cn region and either both absolute source paths or a managed source.');
+        autoRenew = { directory: operatorPemDirectory, bootstrapFile, wrappingCertificateFile, region };
+    }
     const route = env.BAMBU_SIGNED_WRITE_TRANSPORT?.trim();
     if (route === 'local') {
         if (!host || /[\s/@?#]/.test(host) || !lanToken)
@@ -180,7 +190,7 @@ export function signedControlConfiguration(env, host, lanToken) {
         const localTlsServername = env.BAMBU_SIGNED_LOCAL_TLS_SERVERNAME?.trim();
         if (localTlsServername && (isIP(localTlsServername) !== 0 || localTlsServername.length > 253 || !/^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(localTlsServername)))
             throw new Error('Signed local TLS server name must be a DNS name.');
-        return { url: `mqtts://${host}:8883`, username: 'bblp', password: lanToken, operatorPemDirectory, deviceCaFile, sequenceStore, localTlsCaFile, localTlsServername };
+        return { url: `mqtts://${host}:8883`, username: 'bblp', password: lanToken, operatorPemDirectory, deviceCaFile, sequenceStore, localTlsCaFile, localTlsServername, autoRenew };
     }
     if (route === 'cloud') {
         const url = env.BAMBU_SIGNED_CLOUD_BROKER?.trim();
@@ -188,7 +198,7 @@ export function signedControlConfiguration(env, host, lanToken) {
         const password = env.BAMBU_SIGNED_CLOUD_TOKEN;
         if (!url || !username || !password)
             throw new Error('Signed cloud control requires a broker, account username and account token.');
-        return { url, username, password, operatorPemDirectory, deviceCaFile, sequenceStore };
+        return { url, username, password, operatorPemDirectory, deviceCaFile, sequenceStore, autoRenew };
     }
     throw new Error('Select signed control transport local or cloud explicitly.');
 }
@@ -253,7 +263,13 @@ async function sendConfigured(config, serial, command, light, signal, beforePubl
         signal?.throwIfAborted();
         assertActive?.();
         const writer = new SignedTransport({ serial, url: config.url, username: config.username, password: config.password,
-            sessionFactory: () => createSigningSession({ serial, operatorPemDirectory: config.operatorPemDirectory, deviceTrustPem, sequenceStore: config.sequenceStore }),
+            sessionFactory: async () => {
+                if (config.autoRenew) {
+                    const { ensureManagedSigningCredentials } = await import('./signing/bootstrap.js');
+                    await ensureManagedSigningCredentials(config.autoRenew);
+                }
+                return createSigningSession({ serial, operatorPemDirectory: config.operatorPemDirectory, deviceTrustPem, sequenceStore: config.sequenceStore });
+            },
             beforePublish, assertActive, onPublish, tlsCa, tlsServername: config.localTlsServername, accountGuard: config.accountGuard,
         });
         if (light)

@@ -949,6 +949,20 @@ export class BambuImplementation {
     return { finishedJob, serial, model: inspection.model, notices };
   }
 
+  /** Confirmation for provider metadata only: no original G-code bytes were inspected. */
+  async confirmCompletedJobReferencePreflight(serial:string,status:any,reference:{sourceTaskId:string;model:string;nozzles:number[];materials:string[]}):Promise<PrintPreflight> {
+    const finishedJob=this.finishedJobIdentity(status),cleared=this.clearedErrors.get(serial);
+    const notices=hiddenHmsNotices(status?.raw,serial,reference.model),unchipped=unchippedNozzles(status?.raw);
+    await this.confirmHardwareAction(
+      `Reprint completed provider job ${reference.sourceTaskId} on ${reference.model.toUpperCase()} (${serial})? This is a provider completed-job reference; original G-code bytes and temperatures have not been inspected. `+
+      `Declared nozzles: ${reference.nozzles.join(', ')} mm. Declared materials: ${reference.materials.join(', ')}. Physically confirm the bed is clear and the installed nozzles and spool labels match.`+
+      (status.raw.gcode_state==='FAILED' && finishedJob!==undefined ? ' The previous job reports FAILED; the fresh report meets the checked idle and error requirements. No error-reset command is sent.' : '')+
+      (cleared ? ` Previously cleared hardware codes: ${cleared.map(describeHmsKey).join(', ')}. Confirm their physical causes are resolved.` : '')+
+      (notices.length ? ` The printer also reports ${notices.join(', ')}, which Bambu hides and does not show as a fault.` : '')+
+      (unchipped.length ? ` Nozzle ${unchipped.join(', ')} has no identity chip; confirm the configured settings match the installed hardware.` : ''),true);
+    return {finishedJob,serial,model:reference.model,notices};
+  }
+
   /** Stop a print whose confirmed situation changed: a newly finished job, or a hidden HMS notice the preflight did not name. */
   assertPrintPreflight(status: any, preflight: PrintPreflight): void {
     const current = this.finishedJobIdentity(status);
@@ -1230,7 +1244,7 @@ export class BambuImplementation {
     assertDirectPrintSupported(options.bambuModel, serial);
     return withPrinterOperation(host, serial, assertActive => withPrintSnapshot(options.filePath, filePath =>
       this.print3mfPrepared(host, serial, token, { ...options, filePath }, assertActive)
-    ));
+    ), true);
   }
 
   private async print3mfPrepared(host: string, serial: string, token: string, options: BambuPrintOptionsInternal, assertActive: () => void): Promise<any> {
@@ -1711,7 +1725,7 @@ export class BambuImplementation {
       const reply = await answered;
       if (reply && !reply.accepted) throw new Error(refusedControlMessage("resume", "the local network", reply.errCode, true));
       return { status: "success", confirmed: Boolean(reply), message: reply ? `The printer accepted Resume for ${jobName}.` : `Resume command sent for ${jobName}.`, jobName, bytesVerified };
-    });
+    },true);
   }
 
   /**
@@ -2187,7 +2201,7 @@ export class BambuImplementation {
     }
     return withPrinterOperation(host, serial, assertActive => withPrintSnapshot(filePath, snapshot =>
       this.printRawPrepared(host, serial, token, snapshot, remotePath, bambuModel, assertActive)
-    ));
+    ), true);
   }
 
   private async printRawPrepared(host: string, serial: string, token: string, filePath: string, filename: string, bambuModel: string | undefined, assertActive: () => void) {
@@ -2304,7 +2318,7 @@ export class BambuImplementation {
         // original remote name would allow it to change after inspection.
         return await withPrintSnapshot(localPath, snapshot => this.printRawPrepared(host, serial, token, snapshot, remotePath, bambuModel, assertActive));
       } finally { await fs.rm(directory, { recursive: true, force: true }); }
-    });
+    },true);
   }
 
   private async ftpDownload(host: string, token: string, remotePath: string, localPath: string): Promise<void> {
