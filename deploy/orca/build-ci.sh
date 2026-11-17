@@ -23,7 +23,7 @@ free -h
 # A minimal build-only Dockerfile avoids coupling CI to runtime image changes.
 # It follows the same pinned upstream build recipe as the runtime Dockerfile.
 
-docker build --platform linux/amd64 --target build --tag orca-pinned-ci:local --file "$GITHUB_WORKSPACE/deploy/orca/build-source.Dockerfile" "$temp_dir"
+docker build --progress=plain --platform linux/amd64 --target build --tag orca-pinned-ci:local --file "$GITHUB_WORKSPACE/deploy/orca/build-source.Dockerfile" "$temp_dir"
 # Check the uncompressed payload before copying or uploading it. The build
 # image and its dependency tree are deliberately excluded from the artifact.
 docker run --rm --entrypoint /bin/bash orca-pinned-ci:local -c '

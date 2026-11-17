@@ -4,7 +4,7 @@
 
 ### Added
 
-- Prepare a separate Orca workspace runtime for the selected official development MCP and X2D profiles. Durable workspace IDs coordinate a single on-demand GUI worker with checkpoint/recovery, a private Unix socket gateway and no direct printer network. The source passed independent review and all 35 isolated Linux tests passed; the real image and synthetic X2D slice/export/restore and client qualification remain pending.
+- Prepare a separate Orca workspace runtime for the selected official development MCP and X2D profiles. Durable workspace IDs coordinate a single on-demand GUI worker with checkpoint/recovery, a private Unix socket gateway and no direct printer network. The source passed independent review and all 35 isolated Linux tests passed. The initial source build failed during AppImage packaging; a corrected helper produced and extracted a synthetic AppImage offline without FUSE privileges, but the complete Orca image remains unbuilt. Synthetic X2D slice/export/restore and client qualification remain pending.
 
 - Add the candidate explicit `signed_mqtt` 3MF route: separately configured printer-storage TLS, capability and collision checks, upload and full size/SHA-256 readback, followed by checked signed MQTT project dispatch. `upload_file` supports upload-only; raw `upload_gcode` refuses this route. No automatic fallback or replay; a private X2D trial observed upload readback and a completed job, while wider model and physical-fit qualification remain open.
 
