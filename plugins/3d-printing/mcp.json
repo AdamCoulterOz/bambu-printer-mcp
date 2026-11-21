@@ -1,0 +1,39 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "printer": {
+      "type": "streamable-http",
+      "url": "https://YOUR_MCP_HOST/3d-printing",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "baseScopes": [
+              "mcp_access"
+            ]
+          }
+        }
+      }
+    },
+    "slicer": {
+      "type": "streamable-http",
+      "url": "https://YOUR_MCP_HOST/3d-printing/slicer",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "baseScopes": [
+              "slicer_access"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

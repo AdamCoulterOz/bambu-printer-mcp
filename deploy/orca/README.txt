@@ -67,13 +67,21 @@ Runtime image from the separately built CI artifact:
    extraction. The archive must come from the accepted source/build revision.
 2. In an otherwise empty runtime build context, copy this directory's Dockerfile.runtime,
    .dockerignore, gateway.py, supervisor.py, workspace.py, protocol.py,
-   orca_backend.py, export_store.py and verify_bundle.py. Extract the verified artifact beneath
+   orca_backend.py, export_store.py, verify_bundle.py and the required
+   `orca-session` launcher. Extract the verified artifact beneath
    bundle/. Bundle contents must include build/OrcaSlicer_Linux_V*.AppImage,
    tools/mcp/, LICENSE.txt, ORCA_COMMIT, BUILD_REPOSITORY_COMMIT, SHA256SUMS.
 3. Build with: docker build --platform linux/amd64 -f Dockerfile.runtime .
    The image verifies the upstream source commit and complete file manifest
    before extracting the AppImage. The external archive hash must be checked
    separately; matching hashes do not by themselves establish publisher identity.
+
+Public-safe provenance for the historical verified artifact is recorded in
+deploy/orca/qualification/README.txt: repository commit
+309e42d6b746bbc9c45a67739d9b9a43e0f42fc5, upstream Orca commit
+8cccdf82d00381942d9b664750457da318e7d068, archive name/size/hash,
+AppImage name/size/hash, and its verified 91-entry manifest. Do not copy local
+state paths, receipts, profiles, credentials or binaries into this repository.
 
 The Linux lifecycle fixtures launch dummy Python processes, not Orca. The final
 isolated Linux suite passed all 56 tests as UID 10001 without network, including

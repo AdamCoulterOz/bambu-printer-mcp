@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "author": {
+    "name": "Adam Coulter"
+  },
+  "description": "Prepare, slice, inspect, and manage 3D prints using connected services.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "capabilities": [],
+        "category": "Creativity",
+        "composerIcon": "./assets/icon.svg",
+        "defaultPrompt": "Help me prepare and inspect a 3D print.",
+        "developerName": "Adam Coulter",
+        "displayName": "3D Printing",
+        "logo": "./assets/icon.svg",
+        "longDescription": "Prepare models, inspect slicer results, and use connected printer workflows with explicit user direction.",
+        "shortDescription": "Prepare and manage 3D prints"
+      }
+    }
+  },
+  "name": "3d-printing",
+  "version": "0.1.2"
+}

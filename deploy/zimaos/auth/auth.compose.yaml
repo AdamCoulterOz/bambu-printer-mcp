@@ -1,0 +1,73 @@
+services:
+  bambu-mcp-auth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${AUTH_IMAGE:?set a local image name and tag}
+    user: "1000:1000"
+    group_add:
+      - "${SLICER_SOCKET_GID:?set the host slicer-socket group gid}"
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=1777
+    environment:
+      MCP_PUBLIC_ORIGIN: ${MCP_PUBLIC_ORIGIN:?set the public HTTPS origin}
+      MCP_TRUSTED_HOST: ${MCP_TRUSTED_HOST:?set the exact public host}
+      MCP_TENANT_ID: ${MCP_TENANT_ID:?set the tenant GUID}
+      MCP_ENTRA_CLIENT_ID: ${MCP_ENTRA_CLIENT_ID:?set the gateway application GUID}
+      MCP_ALLOWED_OID: ${MCP_ALLOWED_OID:?set the permitted operator object GUID}
+      MCP_ENTRA_SECRET_FILE: /run/printer-private/entra-secret
+      MCP_JWT_KEY_FILE: /run/printer-private/printer-jwt-key
+      MCP_STORAGE_KEY_FILE: /run/printer-private/printer-storage-key
+      MCP_BACKEND_TOKEN_FILE: /run/printer-private/printer-backend-bearer
+      MCP_STATE_DIR: /state
+      MCP_PRINTER_BACKEND_URL: ${MCP_PRINTER_BACKEND_URL:?set the fixed loopback printer endpoint}
+      SLICER_JWT_KEY_FILE: /run/slicer-private/slicer-jwt-key
+      SLICER_STORAGE_KEY_FILE: /run/slicer-private/slicer-storage-key
+      SLICER_BACKEND_TOKEN_FILE: /run/slicer-private/slicer-backend-bearer
+      SLICER_STATE_DIR: /slicer-state
+      SLICER_SOCKET_PATH: /run/bambu-slicer-socket/mcp.sock
+      SLICER_BACKEND_PATH: /3d-printing/slicer
+    volumes:
+      - type: bind
+        source: ${MCP_PRINTER_STATE_DIR:?set a private printer state directory}
+        target: /state
+      - type: bind
+        source: ${SLICER_STATE_DIR:?set a separate private slicer state directory}
+        target: /slicer-state
+      - type: bind
+        source: ${SLICER_SOCKET_DIRECTORY:?set the slicer socket directory}
+        target: /run/bambu-slicer-socket
+        read_only: true
+      - type: bind
+        source: ${MCP_ENTRA_SECRET_HOST_FILE:?set an owner-only Entra secret file}
+        target: /run/printer-private/entra-secret
+        read_only: true
+      - type: bind
+        source: ${MCP_JWT_KEY_HOST_FILE:?set an owner-only printer JWT key file}
+        target: /run/printer-private/printer-jwt-key
+        read_only: true
+      - type: bind
+        source: ${MCP_STORAGE_KEY_HOST_FILE:?set an owner-only printer storage key file}
+        target: /run/printer-private/printer-storage-key
+        read_only: true
+      - type: bind
+        source: ${MCP_BACKEND_TOKEN_HOST_FILE:?set an owner-only printer backend bearer file}
+        target: /run/printer-private/printer-backend-bearer
+        read_only: true
+      - type: bind
+        source: ${SLICER_JWT_KEY_HOST_FILE:?set an owner-only slicer JWT key file}
+        target: /run/slicer-private/slicer-jwt-key
+        read_only: true
+      - type: bind
+        source: ${SLICER_STORAGE_KEY_HOST_FILE:?set an owner-only slicer storage key file}
+        target: /run/slicer-private/slicer-storage-key
+        read_only: true
+      - type: bind
+        source: ${SLICER_BACKEND_TOKEN_HOST_FILE:?set an owner-only slicer backend bearer file}
+        target: /run/slicer-private/slicer-backend-bearer
+        read_only: true

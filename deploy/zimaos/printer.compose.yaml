@@ -1,0 +1,51 @@
+# Portable reconstruction of the live printer service, not an appliance export.
+# runtime-env.sh and direct-launch.sh are private, host-provisioned inputs.
+services:
+  printer:
+    image: ${BAMBU_IMAGE:?set BAMBU_IMAGE}
+    container_name: bambu-printer-mcp
+    user: "1000:1000"
+    init: true
+    restart: unless-stopped
+    network_mode: ${BAMBU_NETWORK_MODE:?set BAMBU_NETWORK_MODE}
+    entrypoint: ["/bin/sh", "/run/zima-adapter/native-launch.sh", "docker-entrypoint.sh"]
+    command: ["node", "dist/index.js"]
+    ports:
+      - "127.0.0.1:8189:3000/tcp"
+    group_add: ["${ARTIFACT_GROUP_GID:?set ARTIFACT_GROUP_GID}"]
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_HTTP_HOST: 0.0.0.0
+      BAMBU_ARTIFACT_DIR: /exchange/store
+      BAMBU_ARTIFACT_OUTBOX_DIR: /exchange/outbox
+      BAMBU_ARTIFACT_GROUP_GID: ${ARTIFACT_GROUP_GID:?set ARTIFACT_GROUP_GID}
+    volumes:
+      - type: bind
+        source: ${BAMBU_HOME_DIR:?set BAMBU_HOME_DIR}
+        target: /home/node
+      - type: bind
+        source: ${BAMBU_SECRETS_DIR:?set BAMBU_SECRETS_DIR}
+        target: /run/bambu-secrets
+        read_only: true
+      - type: bind
+        source: ${BAMBU_RUNTIME_ENV_FILE:?set BAMBU_RUNTIME_ENV_FILE}
+        target: /run/zima-adapter/runtime-env.sh
+        read_only: true
+      - type: bind
+        source: ${BAMBU_NATIVE_LAUNCHER_FILE:?set BAMBU_NATIVE_LAUNCHER_FILE}
+        target: /run/zima-adapter/native-launch.sh
+        read_only: true
+      - type: bind
+        source: ${BAMBU_HANDY_APK_FILE:?set BAMBU_HANDY_APK_FILE}
+        target: /run/bambu-input/handy.apk
+        read_only: true
+      - type: bind
+        source: ${BAMBU_TUTK_LOCK_DIR:?set BAMBU_TUTK_LOCK_DIR}
+        target: /run/bambu-tutk-lock
+      - type: bind
+        source: ${ARTIFACT_STORE_DIR:?set ARTIFACT_STORE_DIR}
+        target: /exchange/store
+      - type: bind
+        source: ${ARTIFACT_OUTBOX_DIR:?set ARTIFACT_OUTBOX_DIR}
+        target: /exchange/outbox
+        read_only: true

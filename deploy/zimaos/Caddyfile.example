@@ -1,0 +1,17 @@
+# Add this site block to the owner-managed Caddy configuration. Global TLS,
+# logging and listener policy remain external; do not reload from this example.
+{$MCP_PUBLIC_HOST} {
+	log_skip
+
+	route {
+		reverse_proxy 127.0.0.1:8188 {
+			# Preserve the public authority and URI for gateway resource/OAuth
+			# discovery matching. Do not route directly to printer or Orca.
+			header_up Host {$MCP_PUBLIC_HOST}
+		}
+	}
+
+	handle_errors {
+		respond "Service unavailable" 503
+	}
+}

@@ -1,0 +1,40 @@
+{
+  "mcpServers": {
+    "printer": {
+      "type": "streamable-http",
+      "url": "https://YOUR_MCP_HOST/3d-printing",
+      "headers": {},
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "baseScopes": [
+              "mcp_access"
+            ]
+          }
+        }
+      }
+    },
+    "slicer": {
+      "type": "streamable-http",
+      "url": "https://YOUR_MCP_HOST/3d-printing/slicer",
+      "headers": {},
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "baseScopes": [
+              "slicer_access"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

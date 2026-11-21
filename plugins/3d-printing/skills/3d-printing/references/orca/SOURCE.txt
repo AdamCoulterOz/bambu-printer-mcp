@@ -1,0 +1,7 @@
+Source: https://github.com/OrcaSlicer/orcaslicer-mcp-skills
+Path: skills/orcaslicer-mcp-skills
+Commit: cf21df6733e767fd3a6863c4e19ce7a7c9400b2f
+Installed: 2026-11-17 using Codex skill-installer; upstream skill files unchanged.
+The license in this directory is copied from the source repository root. This is private provenance and is separate from other projects.
+
+Adapted in this package: frontmatter removed from the guide; portable workflow and authorization notices added and reference links made relative; the executable replay example is omitted and its mention qualified. Other reference content is retained as upstream version-specific examples.

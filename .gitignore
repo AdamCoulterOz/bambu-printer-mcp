@@ -56,3 +56,14 @@ native/*.dSYM/
 !/docs/signing-provisioning.md
 !/docs/TUTK.md
 !/docs/protocol/tutk-wire.md
+!/plugins/3d-printing/**/*.md
+!/deploy/zimaos/**/README.md
+!/deploy/zimaos/gateway-contract.md
+
+# Deployment inputs and state remain local to the operator.
+/deploy/zimaos/**/*.local.*
+/deploy/zimaos/**/.env.*
+!/deploy/zimaos/**/.env.example
+/deploy/zimaos/**/secrets/
+/deploy/zimaos/**/__pycache__/
+/deploy/orca/**/__pycache__/

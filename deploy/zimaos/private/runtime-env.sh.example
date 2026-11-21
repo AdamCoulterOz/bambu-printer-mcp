@@ -1,0 +1,39 @@
+#!/bin/sh
+# PRIVATE TEMPLATE: copy outside Git, replace every __SET_*__ value, then make
+# it mode 0600 and owned by UID:GID 1000:1000. It is sourced by native-launch.
+# Do not put bearer, printer access, account, MQTT or signing-key bytes here.
+
+export BAMBU_DEFAULT_CONNECTION_MODE='signed_mqtt'
+export BAMBU_MODEL='__SET_PRINTER_MODEL__'
+export BAMBU_SERIAL='__SET_PRINTER_SERIAL__'
+export PRINTER_HOST='__SET_PRINTER_HOST__'
+export BAMBU_TOKEN_FILE='/run/bambu-secrets/printer-access-token'
+export BAMBU_PRINTER_TLS_CA_FILE='/run/bambu-secrets/printer-tls-cas.pem'
+export BAMBU_RESUME_STATE_DIR='/home/node/.config/bambu-printer-mcp/resume'
+export BAMBU_SIGNED_CONTROLS='true'
+export BAMBU_SIGNED_WRITE_TRANSPORT='cloud'
+export BAMBU_SIGNING_DIR='/home/node/.local/state/bambu-printer-mcp/managed-signing'
+export BAMBU_SIGNING_DEVICE_CA_FILE='/run/bambu-secrets/device-trust-cas.pem'
+export BAMBU_SIGNING_STATE_DIR='/home/node/.local/state/bambu-printer-mcp/signing'
+export BAMBU_SIGNING_BOOTSTRAP_ENABLED='true'
+export BAMBU_SIGNING_SOURCE_APK='/run/bambu-input/handy.apk'
+export BAMBU_SIGNING_AUTO_RENEW='true'
+export BAMBU_SIGNING_REGION='global'
+export BAMBU_CLOUD_PRINT_ENABLED='true'
+export BAMBU_HANDY_OS_VERSION='__SET_HANDY_OS_VERSION__'
+export BAMBU_TUTK_ENABLED='true'
+export BAMBU_TUTK_OPERATION_LOCK_FILE='/run/bambu-tutk-lock/operation.lock'
+export COUNTERPART_RECORD_DIR='/home/node/.config/bambu-printer-mcp/print-records'
+export MCP_TRANSPORT='streamable-http'
+export MCP_HTTP_HOST='0.0.0.0'
+export MCP_HTTP_PORT='3000'
+export MCP_HTTP_PATH='/3d-printing'
+export MCP_HTTP_JSON_RESPONSE='true'
+export MCP_HTTP_STATEFUL='false'
+export MCP_HTTP_ALLOWED_HOSTS='YOUR_MCP_HOST'
+export MCP_HTTP_BEARER_TOKEN_FILE='/run/bambu-secrets/http-token'
+export HOME='/home/node'
+export XDG_CONFIG_HOME='/home/node/.config'
+
+# The image's startup receives BAMBU_TOKEN as an environment variable. The
+# launcher reads it only at process start; do not export it from this template.

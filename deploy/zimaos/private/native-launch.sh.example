@@ -1,0 +1,43 @@
+#!/bin/sh
+# Copy outside the repository as native-launch.sh, substitute no secret bytes,
+# then chmod 0600 and chown 1000:1000. The live launcher follows this control
+# flow: source private configuration, select managed account mode, then exec.
+set -eu
+
+runtime_env=/run/zima-adapter/runtime-env.sh
+[ -f "$runtime_env" ] && [ -r "$runtime_env" ] || {
+  echo "missing readable private runtime environment" >&2
+  exit 64
+}
+. "$runtime_env"
+
+require_regular() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] || {
+    echo "missing readable private file: $1" >&2
+    exit 64
+  }
+}
+
+# Private inputs must be regular owner-only files. Do not echo their contents.
+require_regular "$MCP_HTTP_BEARER_TOKEN_FILE"
+require_regular "$BAMBU_TOKEN_FILE"
+require_regular "$BAMBU_PRINTER_TLS_CA_FILE"
+require_regular "$BAMBU_SIGNING_DEVICE_CA_FILE"
+require_regular "$BAMBU_TUTK_OPERATION_LOCK_FILE"
+require_regular "$BAMBU_SIGNING_SOURCE_APK"
+[ -d "$BAMBU_SIGNING_DIR" ] && [ -d "$BAMBU_SIGNING_STATE_DIR" ] || exit 64
+
+# The server's established configuration consumes the printer access token as
+# BAMBU_TOKEN. Read it only after the private file checks and do not log it.
+BAMBU_TOKEN="$(tr -d '\r\n' < "$BAMBU_TOKEN_FILE")"
+[ -n "$BAMBU_TOKEN" ] || exit 64
+export BAMBU_TOKEN
+unset BAMBU_TOKEN_FILE
+
+# Account mode deliberately replaces the explicit cloud broker/username/token
+# triple. The account session remains in private Node state and is never copied
+# into this script or its environment.
+export BAMBU_SIGNED_CLOUD_AUTH=account
+unset BAMBU_SIGNED_CLOUD_BROKER BAMBU_SIGNED_CLOUD_USERNAME BAMBU_SIGNED_CLOUD_TOKEN
+
+exec "$@"

@@ -1,5 +1,9 @@
 # Decision history
 
+## 2026-11-21 — Printing stack checkpoint
+
+Saved the plugin package and shared skill, configured ZimaOS deployment templates, OAuth gateway source and Orca qualification helpers on the printer MCP checkpoint branch. This makes the source for the separate services recoverable together. Credential files and service state remain in their private stores. Runtime code and service boundaries are unchanged by the checkpoint.
+
 ## 2026-11-21 — Managed account and fork checkpoint
 
 Managed account authority supports private refresh material and journaled rotation. Authenticated account and printer reads passed for one selected printer; an actual refresh exchange remains unqualified. The Linux suite passed 1,879 tests with 39 skips, followed by five focused opaque-account tests. This checkpoint is not an upstream release.

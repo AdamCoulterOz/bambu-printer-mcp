@@ -1,0 +1,48 @@
+# The seven Orca runtime files and their build recipe remain deploy/orca/.
+# This is only the ZimaOS runtime placement and privilege boundary.
+services:
+  orca:
+    image: ${ORCA_IMAGE:?set ORCA_IMAGE}
+    container_name: orca-slicer
+    pull_policy: never
+    user: "10001:10001"
+    group_add: ["${ARTIFACT_GROUP_GID:?set ARTIFACT_GROUP_GID}"]
+    init: true
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,mode=1777
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 2
+    pids_limit: 256
+    restart: unless-stopped
+    environment:
+      ORCA_GATEWAY_HOST: ${ORCA_GATEWAY_HOST:?set ORCA_GATEWAY_HOST}
+      ORCA_GATEWAY_TOKEN_FILE: /run/secrets/orca-token
+      ORCA_EXPORT_DIR: /exchange/outbox
+      ORCA_ARTIFACT_GROUP_GID: ${ARTIFACT_GROUP_GID:?set ARTIFACT_GROUP_GID}
+      ORCA_SOCKET_MODE: "0660"
+    volumes:
+      - type: bind
+        source: ${ORCA_STATE_DIR:?set ORCA_STATE_DIR}
+        target: /home/orca
+      - type: bind
+        source: ${ORCA_ARTIFACT_DIR:?set ORCA_ARTIFACT_DIR}
+        target: /artifacts
+      - type: bind
+        source: ${ORCA_SOCKET_DIR:?set ORCA_SOCKET_DIR}
+        target: /run/orca-gateway
+      - type: bind
+        source: ${ORCA_TOKEN_FILE:?set ORCA_TOKEN_FILE}
+        target: /run/secrets/orca-token
+        read_only: true
+      - type: bind
+        source: ${ARTIFACT_STORE_DIR:?set ARTIFACT_STORE_DIR}/published
+        target: /exchange/store/published
+        read_only: true
+      - type: bind
+        source: ${ARTIFACT_OUTBOX_DIR:?set ARTIFACT_OUTBOX_DIR}
+        target: /exchange/outbox
