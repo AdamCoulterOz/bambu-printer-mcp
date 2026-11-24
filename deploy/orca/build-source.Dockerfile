@@ -18,7 +18,7 @@ WORKDIR /opt/orca-source
 RUN git init && git remote add origin https://github.com/OrcaSlicer/OrcaSlicer.git \
  && git fetch --depth 600 origin "$ORCA_MAIN_COMMIT" "$ORCA_MCP_COMMIT" \
  && git checkout --detach "$ORCA_MAIN_COMMIT" \
- && git merge --no-ff --no-commit "$ORCA_MCP_COMMIT" \
+ && GIT_AUTHOR_NAME='Orca source merger' GIT_AUTHOR_EMAIL='build@invalid.local' GIT_AUTHOR_DATE='2026-11-24T00:00:00Z' GIT_COMMITTER_NAME='Orca source merger' GIT_COMMITTER_EMAIL='build@invalid.local' GIT_COMMITTER_DATE='2026-11-24T00:00:00Z' git merge --no-ff --no-commit "$ORCA_MCP_COMMIT" \
  && test "$(git write-tree)" = "$ORCA_SOURCE_TREE" \
  && GIT_AUTHOR_NAME='Orca source merger' GIT_AUTHOR_EMAIL='build@invalid.local' GIT_AUTHOR_DATE='2026-11-24T00:00:00Z' GIT_COMMITTER_NAME='Orca source merger' GIT_COMMITTER_EMAIL='build@invalid.local' GIT_COMMITTER_DATE='2026-11-24T00:00:00Z' git commit --no-gpg-sign -m 'Merge OrcaSlicer main 6b79a61 and feature/mcp bff0641 for isolated qualification' \
  && test "$(git rev-parse HEAD)" = "$ORCA_COMMIT" \
