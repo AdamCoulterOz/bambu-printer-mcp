@@ -3,7 +3,7 @@ name: Build pinned Orca development artifact
 on:
   push:
     branches:
-      - codex/signed-x2d-agent-printing
+      - codex/orca-upstream-20261124
     paths:
       - .github/workflows/orca-dev-build.yml
       - deploy/orca/build-ci.sh

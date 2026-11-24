@@ -6,7 +6,10 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_ENVIRONMENT:-}" != github-hoste
   echo 'This build requires a disposable GitHub-hosted Linux x64 Actions runner.' >&2
   exit 1
 fi
-readonly orca_commit=8cccdf82d00381942d9b664750457da318e7d068
+readonly orca_main_commit=6b79a61ff323a03f67c5778a00019f6744986389
+readonly orca_mcp_commit=bff0641b288acc115b5ee8cb36e2f5568b855f28
+readonly orca_commit=b1b1fb328d66a3f7f48110dd7612f8592179a6d0
+readonly orca_source_tree=14e2e8cd7fec8600577ff4374a44a872a3ec0a66
 readonly limit_bytes=$((500 * 1024 * 1024))
 readonly out="$GITHUB_WORKSPACE/orca-artifact"
 readonly temp_dir="$(mktemp -d)"
@@ -42,6 +45,9 @@ docker run --rm --entrypoint /bin/bash orca-pinned-ci:local -c '
   tar -cf - build/OrcaSlicer_Linux_V*.AppImage tools/mcp LICENSE.txt
 ' | tar -xf - -C "$temp_dir/payload"
 printf '%s\n' "$orca_commit" > "$temp_dir/payload/ORCA_COMMIT"
+printf '%s\n' "$orca_main_commit" > "$temp_dir/payload/ORCA_MAIN_COMMIT"
+printf '%s\n' "$orca_mcp_commit" > "$temp_dir/payload/ORCA_MCP_COMMIT"
+printf '%s\n' "$orca_source_tree" > "$temp_dir/payload/ORCA_SOURCE_TREE"
 printf '%s\n' "${GITHUB_SHA:?}" > "$temp_dir/payload/BUILD_REPOSITORY_COMMIT"
 (
   cd "$temp_dir/payload"

@@ -5,8 +5,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /bundle
 COPY bundle/ ./
 COPY verify_bundle.py /tmp/verify_bundle.py
-RUN set -eu; test "$(cat ORCA_COMMIT)" = 8cccdf82d00381942d9b664750457da318e7d068; \
-    test "$(wc -l < ORCA_COMMIT)" -eq 1; grep -Eq '^[0-9a-f]{40}$' BUILD_REPOSITORY_COMMIT; \
+RUN set -eu; test "$(cat ORCA_COMMIT)" = b1b1fb328d66a3f7f48110dd7612f8592179a6d0; \
+    test "$(cat ORCA_MAIN_COMMIT)" = 6b79a61ff323a03f67c5778a00019f6744986389; \
+    test "$(cat ORCA_MCP_COMMIT)" = bff0641b288acc115b5ee8cb36e2f5568b855f28; \
+    test "$(cat ORCA_SOURCE_TREE)" = 14e2e8cd7fec8600577ff4374a44a872a3ec0a66; \
+    test "$(wc -l < ORCA_COMMIT)" -eq 1; test "$(wc -l < ORCA_MAIN_COMMIT)" -eq 1; test "$(wc -l < ORCA_MCP_COMMIT)" -eq 1; test "$(wc -l < ORCA_SOURCE_TREE)" -eq 1; grep -Eq '^[0-9a-f]{40}$' BUILD_REPOSITORY_COMMIT; \
     test "$(wc -l < BUILD_REPOSITORY_COMMIT)" -eq 1; python3 /tmp/verify_bundle.py; \
     set -- build/OrcaSlicer_Linux_V*.AppImage; test "$#" -eq 1; test -f "$1"; \
     test -f tools/mcp/orca_mcp.py; test -f LICENSE.txt; chmod +x "$1"; "$1" --appimage-extract; \

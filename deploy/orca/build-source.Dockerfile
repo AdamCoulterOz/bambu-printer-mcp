@@ -1,6 +1,12 @@
 FROM --platform=linux/amd64 ubuntu:24.04 AS build
 ARG DEBIAN_FRONTEND=noninteractive
-ENV ORCA_COMMIT=8cccdf82d00381942d9b664750457da318e7d068
+# The development MCP branch and current upstream main diverged before the
+# multi-plate export correction. Reconstruct the reviewed clean merge from
+# immutable upstream commits and assert both the synthetic commit and tree.
+ENV ORCA_MAIN_COMMIT=6b79a61ff323a03f67c5778a00019f6744986389 \
+    ORCA_MCP_COMMIT=bff0641b288acc115b5ee8cb36e2f5568b855f28 \
+    ORCA_COMMIT=b1b1fb328d66a3f7f48110dd7612f8592179a6d0 \
+    ORCA_SOURCE_TREE=14e2e8cd7fec8600577ff4374a44a872a3ec0a66
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git sudo curl python3 file && rm -rf /var/lib/apt/lists/*
 # Download and verify packaging tools before the offline packaging step.
 RUN mkdir -p /opt/orca-build-assets \
@@ -10,8 +16,13 @@ RUN mkdir -p /opt/orca-build-assets \
  && echo '617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46  /opt/orca-build-assets/runtime-x86_64' | sha256sum -c -
 WORKDIR /opt/orca-source
 RUN git init && git remote add origin https://github.com/OrcaSlicer/OrcaSlicer.git \
- && git fetch --depth 1 origin "$ORCA_COMMIT" && git checkout --detach FETCH_HEAD \
- && test "$(git rev-parse HEAD)" = "$ORCA_COMMIT"
+ && git fetch --depth 600 origin "$ORCA_MAIN_COMMIT" "$ORCA_MCP_COMMIT" \
+ && git checkout --detach "$ORCA_MAIN_COMMIT" \
+ && git merge --no-ff --no-commit "$ORCA_MCP_COMMIT" \
+ && test "$(git write-tree)" = "$ORCA_SOURCE_TREE" \
+ && GIT_AUTHOR_NAME='Orca source merger' GIT_AUTHOR_EMAIL='build@invalid.local' GIT_AUTHOR_DATE='2026-11-24T00:00:00Z' GIT_COMMITTER_NAME='Orca source merger' GIT_COMMITTER_EMAIL='build@invalid.local' GIT_COMMITTER_DATE='2026-11-24T00:00:00Z' git commit --no-gpg-sign -m 'Merge OrcaSlicer main 6b79a61 and feature/mcp bff0641 for isolated qualification' \
+ && test "$(git rev-parse HEAD)" = "$ORCA_COMMIT" \
+ && test "$(git rev-parse HEAD^{tree})" = "$ORCA_SOURCE_TREE"
 RUN ./build_linux.sh -u && ./build_linux.sh -dr -j 2
 RUN ./build_linux.sh -sr -j 2
 # The generated helper computes the repository root from the build directory,
