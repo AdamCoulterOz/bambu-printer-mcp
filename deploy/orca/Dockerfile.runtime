@@ -24,6 +24,10 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 COPY --from=unpack /bundle/squashfs-root/ /opt/orca/
 COPY --from=unpack /bundle/tools/mcp/ /opt/orca-harness/
 COPY --from=unpack /bundle/LICENSE.txt /opt/orca-license/LICENSE.txt
+# The upstream MCP harness resolves bundled vendor profiles two levels above
+# its script path. Keep that repository-relative location available when the
+# harness is installed separately from the extracted AppImage.
+RUN ln -s /opt/orca/resources /resources
 COPY gateway.py supervisor.py workspace.py protocol.py orca_backend.py export_store.py /opt/orca-runtime/
 COPY orca-session /opt/orca-runtime/orca-session
 RUN chmod 755 /opt/orca-runtime/orca-session && test -x /usr/bin/dbus-run-session && test -x /usr/bin/dbus-daemon && test -x /opt/orca-runtime/orca-session
