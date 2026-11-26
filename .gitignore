@@ -66,4 +66,3 @@ native/*.dSYM/
 !/deploy/zimaos/**/.env.example
 /deploy/zimaos/**/secrets/
 /deploy/zimaos/**/__pycache__/
-/deploy/orca/**/__pycache__/

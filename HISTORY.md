@@ -1,5 +1,9 @@
 # Decision history
 
+## 2026-11-26 — Orca runtime moved to the OrcaSlicer fork
+
+The hosted Orca runtime, gateway, build recipe and qualification notes now live only in the OrcaSlicer fork under `deploy/orca` on `codex/hosted-orca-mcp`, which builds from the qualified source merge `b1b1fb3`. This repository no longer carries that copy or its build workflow; it keeps the ZimaOS placement in `deploy/zimaos` and consumes the slicer service only through its published workspace contract. The previous all-in-one Orca Dockerfile was not carried over and remains in this repository's history. No service was redeployed.
+
 ## 2026-11-24 — Mixed-nozzle X2D inspection
 
 The selected G-code’s complete physical-extruder map determines firmware order for nozzle diameter, type and flow comparisons. A scalar first-extruder diameter requires a corroborating single-filament selection. The inspector preserves the archive bytes and checks both installed nozzle declarations at preflight. Exact Arachne and Classic TPU exports passed isolated file inspection and synthetic HS01 external-tray preflight.

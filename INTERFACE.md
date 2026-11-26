@@ -24,7 +24,7 @@ The separately owned Orca service can be exposed through an authenticated proxy 
 
 The candidate owns a private D-Bus session with the GUI worker. Its internal launch identity is a session runner; this interface does not expose or guarantee a GUI process ID. An isolated actual-image trial verified the process topology, two clean closes and a same-ID restore.
 
-An isolated runtime trial reached readiness, sliced an X2D fixture and separately completed checkpoint, same-ID restore and cleanup. A fresh-client authenticated slicer invocation remains unverified. See [deploy/orca/README.txt](deploy/orca/README.txt) for configuration and validation limits.
+An isolated runtime trial reached readiness, sliced an X2D fixture and separately completed checkpoint, same-ID restore and cleanup. A fresh-client authenticated slicer invocation remains unverified. See the [OrcaSlicer fork's deploy/orca/README.txt](https://github.com/AdamCoulterOz/OrcaSlicer/tree/codex/hosted-orca-mcp/deploy/orca/README.txt) for configuration and validation limits.
 
 ## Printer operations and optional authentication
 

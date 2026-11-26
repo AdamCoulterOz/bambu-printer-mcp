@@ -1,4 +1,5 @@
-# The seven Orca runtime files and their build recipe remain deploy/orca/.
+# The Orca runtime files and their build recipe live in the OrcaSlicer fork:
+# https://github.com/AdamCoulterOz/OrcaSlicer/tree/codex/hosted-orca-mcp/deploy/orca
 # This is only the ZimaOS runtime placement and privilege boundary.
 services:
   orca:

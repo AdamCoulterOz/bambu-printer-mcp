@@ -4,7 +4,7 @@ This Bambu-only MCP server provides printer, account, slicing, model and monitor
 
 ## Runtime and account
 
-Streamable HTTP uses bounded per-request protocol contexts over one shared backend. Cancellation is operation-scoped; shutdown does not guarantee a global drain, and uncertain mutations are not replayed. The optional stdio relay uses a private bearer and does not own the backend. The separately packaged Orca workspace and printer artifact store share an opaque workspace ID, but retain independent state and lifecycles. A workspace or an adopted artifact does not authorize printing.
+Streamable HTTP uses bounded per-request protocol contexts over one shared backend. Cancellation is operation-scoped; shutdown does not guarantee a global drain, and uncertain mutations are not replayed. The optional stdio relay uses a private bearer and does not own the backend. The separately packaged Orca workspace (source and build in the [OrcaSlicer fork](https://github.com/AdamCoulterOz/OrcaSlicer/tree/codex/hosted-orca-mcp/deploy/orca)) and printer artifact store share an opaque workspace ID, but retain independent state and lifecycles. A workspace or an adopted artifact does not authorize printing.
 
 The checkpoint branch also holds the [3D Printing plugin and shared skill](plugins/3d-printing/) and the [ZimaOS deployment source](deploy/zimaos/). The deployment describes the configured printer and slicer services, OAuth gateway, and data-only mounts. Its credential inputs and mutable volumes remain operator-owned.
 
