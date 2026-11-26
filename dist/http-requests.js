@@ -7,6 +7,7 @@ import { ActiveOperation } from './http-operation.js';
 import { createModernHttpAdapter } from './http-modern.js';
 import { isLegacyRequest } from '@modelcontextprotocol/server';
 import { toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
+import { handleWorkspaceArtifactUpload } from './workspace-artifacts.js';
 const key = (nonce, id) => `${nonce}:${typeof id}:${String(id)}`;
 const reject = (res, code, message) => { res.writeHead(code, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end(message); };
 async function readBody(req, maximum) {
@@ -119,7 +120,8 @@ export class HttpRequests {
             const origin = req.headers.origin;
             if (origin !== undefined && !this.options.allowedOrigins.has(origin))
                 return this.denied(res, 403, 'Forbidden origin');
-            if (new URL(req.url ?? '/', 'http://localhost').pathname !== this.options.path)
+            const requestPath = new URL(req.url ?? '/', 'http://localhost').pathname;
+            if (requestPath !== this.options.path && !requestPath.startsWith(`${this.options.path}/workspace-uploads/`))
                 return this.denied(res, 404, 'Not found');
             if (req.method === 'OPTIONS') {
                 if (origin) {
@@ -140,6 +142,10 @@ export class HttpRequests {
                     return this.denied(res, 401, 'Unauthorized');
                 }
             }
+            // The public gateway authenticates this capability route and injects the
+            // backend bearer. It is deliberately a raw upload, not an MCP JSON call.
+            if (await handleWorkspaceArtifactUpload(req, res))
+                return;
             if (origin) {
                 res.setHeader('Access-Control-Allow-Origin', origin);
                 res.setHeader('Vary', 'Origin');

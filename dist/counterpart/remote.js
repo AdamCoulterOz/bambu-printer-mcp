@@ -7,6 +7,7 @@ export const REMOTE_SCOPES = {
     workspace_attach: "design",
     workspace_import_file: "design",
     workspace_upload_begin: "design",
+    workspace_upload_begin_https: "design",
     workspace_upload_chunk: "design",
     workspace_upload_finish: "design",
     workspace_adopt_export: "design",

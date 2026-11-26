@@ -9,6 +9,7 @@ import { createModernHttpAdapter } from './http-modern.js';
 import { isLegacyRequest } from '@modelcontextprotocol/server';
 import { toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import type { HttpSessionOptions } from './http-sessions.js';
+import { handleWorkspaceArtifactUpload } from './workspace-artifacts.js';
 
 type Claims = { nonce: string; params: ReturnType<typeof InitializeRequestSchema.parse>['params'] };
 type Operation = { operation: ActiveOperation; id: RequestId; response: ServerResponse; completed: boolean };
@@ -72,9 +73,13 @@ export class HttpRequests {
       if (this.closing) return this.denied(res,503,'Server shutting down');
       if (!this.validHost(req.headers.host)) return this.denied(res,403,'Forbidden host');
       const origin=req.headers.origin; if (origin !== undefined && !this.options.allowedOrigins.has(origin)) return this.denied(res,403,'Forbidden origin');
-      if (new URL(req.url ?? '/', 'http://localhost').pathname !== this.options.path) return this.denied(res,404,'Not found');
+      const requestPath = new URL(req.url ?? '/', 'http://localhost').pathname;
+      if (requestPath !== this.options.path && !requestPath.startsWith(`${this.options.path}/workspace-uploads/`)) return this.denied(res,404,'Not found');
       if (req.method==='OPTIONS') { if (origin) { res.setHeader('Access-Control-Allow-Origin',origin); res.setHeader('Vary','Origin'); } res.setHeader('Access-Control-Allow-Methods','POST, OPTIONS'); res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID'); res.writeHead(204); res.end(); return; }
       if (this.options.bearerToken) { const a=Buffer.from(req.headers.authorization ?? ''); const b=Buffer.from(`Bearer ${this.options.bearerToken}`); if (a.length!==b.length || !timingSafeEqual(a,b)) { res.setHeader('WWW-Authenticate','Bearer'); return this.denied(res,401,'Unauthorized'); } }
+      // The public gateway authenticates this capability route and injects the
+      // backend bearer. It is deliberately a raw upload, not an MCP JSON call.
+      if (await handleWorkspaceArtifactUpload(req,res)) return;
       if (origin) { res.setHeader('Access-Control-Allow-Origin',origin); res.setHeader('Vary','Origin'); }
       res.setHeader('Access-Control-Expose-Headers','Mcp-Session-Id, MCP-Protocol-Version');
       if (req.method!=='POST') { res.setHeader('Allow','POST, OPTIONS'); return this.denied(res,405,'Method not allowed'); }

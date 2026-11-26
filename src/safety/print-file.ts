@@ -244,15 +244,13 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
   const nozzleDiameters=consistent(metadataValues(metadata,['nozzle_diameter']),value=>{
     const values=list(value);return values.length && values.every(v=>NUMBER.test(v) && [0.2,0.4,0.6,0.8].includes(Number(v)))?values.map(Number):undefined;
   },'nozzle diameter');
-  if(options.nozzleDiameters && (options.nozzleDiameters.length===1 ? !nozzleDiameters.every(value=>value===options.nozzleDiameters![0]) : JSON.stringify(options.nozzleDiameters)!==JSON.stringify(nozzleDiameters))) return fail('file nozzle diameters contradict the requested nozzle diameters');
-  if(plate.nozzle_diameter!==undefined) {
+  const plateNozzleDiameters=(()=>{
+    if(plate.nozzle_diameter===undefined) return undefined;
     const values=typeof plate.nozzle_diameter==='number' ? [String(plate.nozzle_diameter)] : list(plate.nozzle_diameter);
-    if(!values.length || values.some(value=>!NUMBER.test(value) || !Number.isFinite(Number(value))) ||
-       (values.length===1 ? nozzleDiameters.some(diameter=>Math.abs(diameter-Number(values[0]))>1e-6) :
-        values.length!==nozzleDiameters.length || values.some((value,index)=>Math.abs(Number(value)-nozzleDiameters[index])>1e-6))) {
+    if(!values.length || values.some(value=>!NUMBER.test(value) || !Number.isFinite(Number(value))))
       fail('selected plate nozzle diameter metadata contradicts the sliced project nozzles');
-    }
-  }
+    return values.map(Number);
+  })();
   const normalizedEntries=(value:unknown):string[]|undefined=>{
     const entries=list(value).map(entry=>entry.toLowerCase().replace(/[\s_-]+/g,'_'));
     return entries.length && entries.every(Boolean)?entries:undefined;
@@ -341,6 +339,57 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
   if(physicalExtruderMap && new Set(physicalExtruderMap).size!==physicalExtruderMap.length) fail('physical extruder map must be a complete permutation');
   const filamentMap=headerMap('filament_map',materials.length,1,nozzleDiameters.length);
   const filamentNozzleIndices=filamentMap && physicalExtruderMap ? filamentMap.map(logical=>physicalExtruderMap[logical-1]):undefined;
+  const selectedFilamentIds=(()=>{
+    if(plate.filament_ids===undefined) return undefined;
+    if(!Array.isArray(plate.filament_ids)||!plate.filament_ids.length) return fail('malformed selected plate filament_ids metadata');
+    for(const value of plate.filament_ids) if(typeof value!=='number' || !Number.isInteger(value) || value<0 || value>=materials.length)
+      return fail('malformed selected plate filament position');
+    return plate.filament_ids;
+  })();
+  // X2D's project and G-code headers enumerate logical slicer extruders, while
+  // physical_extruder_map maps each logical index to firmware nozzle order. A
+  // mixed pair cannot use the usual scalar plate diameter comparison: Orca's
+  // plate JSON names the first selected logical extruder. Require every link
+  // in that binding before translating the exported inspection for hardware
+  // comparison and downstream preflight.
+  const mixedX2dNozzles=model==='x2d' && nozzleDiameters.length===2 && nozzleDiameters[0]!==nozzleDiameters[1];
+  let inspectedNozzleDiameters=nozzleDiameters;
+  let inspectedNozzleFlows=nozzleFlows;
+  let inspectedNozzleTypes=nozzleTypes;
+  if(mixedX2dNozzles) {
+    if(!physicalExtruderMap) fail('selected mixed-nozzle X2D plate metadata lacks a physical extruder map');
+    if(plateNozzleDiameters?.length===1) {
+      // Plater.cpp stores get_tool_ordering().first_extruder() as the scalar
+      // plate diameter's logical array index. A scalar is sound only when the
+      // selected plate names exactly one filament/logical extruder; membership
+      // in a multi-filament selection would not prove which one prints first.
+      if(!filamentMap || !selectedFilamentIds || selectedFilamentIds.length!==1 ||
+         typeof plate.first_extruder!=='number' || !Number.isInteger(plate.first_extruder) ||
+         plate.first_extruder<0 || plate.first_extruder>=nozzleDiameters.length ||
+         filamentMap[selectedFilamentIds[0]]-1!==plate.first_extruder ||
+         Math.abs(plateNozzleDiameters[0]-nozzleDiameters[plate.first_extruder])>1e-6)
+        fail('selected mixed-nozzle X2D plate metadata cannot establish its first logical extruder');
+    } else if(plateNozzleDiameters &&
+              (plateNozzleDiameters.length!==nozzleDiameters.length ||
+               plateNozzleDiameters.some((diameter,index)=>Math.abs(diameter-nozzleDiameters[index])>1e-6))) {
+      fail('selected plate nozzle diameter metadata contradicts the sliced project nozzles');
+    }
+    const firmwarePhysicalMap=physicalExtruderMap!;
+    const firmwareOrder=<T>(values:T[]|undefined):T[]|undefined=>{
+      if(values===undefined) return undefined;
+      const ordered:T[]=new Array(values.length);
+      for(const [logical,physical] of firmwarePhysicalMap.entries()) ordered[physical]=values[logical];
+      return ordered;
+    };
+    inspectedNozzleDiameters=firmwareOrder(nozzleDiameters)!;
+    inspectedNozzleFlows=firmwareOrder(nozzleFlows);
+    inspectedNozzleTypes=firmwareOrder(nozzleTypes);
+  } else if(plateNozzleDiameters &&
+            (plateNozzleDiameters.length===1 ? nozzleDiameters.some(diameter=>Math.abs(diameter-plateNozzleDiameters[0])>1e-6) :
+             plateNozzleDiameters.length!==nozzleDiameters.length || plateNozzleDiameters.some((diameter,index)=>Math.abs(diameter-nozzleDiameters[index])>1e-6))) {
+    fail('selected plate nozzle diameter metadata contradicts the sliced project nozzles');
+  }
+  if(options.nozzleDiameters && (options.nozzleDiameters.length===1 ? !inspectedNozzleDiameters.every(value=>value===options.nozzleDiameters![0]) : JSON.stringify(options.nozzleDiameters)!==JSON.stringify(inspectedNozzleDiameters))) return fail('file nozzle diameters contradict the requested nozzle diameters');
   const bedValues=metadataValues([...metadata,plate],['curr_bed_type','bed_type']);
   const bedType=bedValues.length?consistent(bedValues,normalizeBed,'bed type'):undefined;
   if(options.bedType && (!bedType || normalizeBed(options.bedType)!==bedType)) return fail('selected bed type cannot be verified or contradicts the sliced file; re-slice with the intended bed');
@@ -350,10 +399,7 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
     if(!Number.isInteger(position)||position<0||position>=materials.length) return fail(`filament/tool position ${position} has no declared material`);
     used.add(position);return position;
   };
-  if(plate.filament_ids !== undefined) {
-    if(!Array.isArray(plate.filament_ids)||!plate.filament_ids.length) return fail('malformed selected plate filament_ids metadata');
-    for(const value of plate.filament_ids) {if(typeof value!=='number' || !Number.isInteger(value)) return fail('malformed selected plate filament position');requirePosition(value);}
-  }
+  if(selectedFilamentIds) for(const value of selectedFilamentIds) requirePosition(value);
   let active: number|undefined = materials.length===1 ? 0 : undefined;
   let nozzleTarget=0;let selectsAms=false;let pending: number|undefined;let previous: number|undefined;
   let maxNozzleTemperature=0,maxBedTemperature=0,maxChamberTemperature=0,commandCount=0;
@@ -441,13 +487,26 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
         continue;
       }
       if(['M104','M109','M140','M190','M141','M191'].includes(code)) {
-        const args=parameters(argumentsText,code==='M104'?'AM':'A');
+        const args=parameters(argumentsText,code==='M104'?'AMWC':'A');
         // Studio 2.9's GCodeWriter marks layer-temperature changes with bare M.
         // Accept only its exact S-target / optional T form; targets and tool
         // selectors still pass through the independent thermal checks below.
         if(args.has('M')) {
           if(!Number.isNaN(args.get('M')!) || !args.has('S') || [...args.keys()].some(key=>!'MST'.includes(key))) fail('unsupported M104 layer-change temperature parameters');
           args.delete('M');
+        }
+        // Bambu Studio 2.9's WipeTowerWriter emits `M104 T<heater> S<target>
+        // N0 W|C`. N0 marks slicer-generated G-code; bare W and C distinguish
+        // its heating and cooling requests. They are not temperature values.
+        // Accept only that complete vendor shape, then retain the ordinary
+        // physical-nozzle and material ceiling checks for T/S below.
+        if(args.has('W') || args.has('C')) {
+          if(code!=='M104' || args.has('W')===args.has('C') ||
+             !Number.isNaN(args.get(args.has('W')?'W':'C')!) || !args.has('T') ||
+             !args.has('S') || args.get('N')!==0 ||
+             [...args.keys()].some(key=>!'STNWC'.includes(key)))
+            fail('unsupported M104 wipe-tower temperature parameters');
+          args.delete('W');args.delete('C');
         }
         // Official A1 and A1 mini start G-code waits with M109 S<target> H<limit>
         // (S25 H140, S100 H170, S220 H300). H is not a heater target: S stays the
@@ -591,5 +650,5 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
   }
   if(!commandCount) return fail('selected G-code contains no printable commands');
   if(!used.size) materials.forEach((_,index)=>used.add(index));
-  return {model,nozzleDiameters,materials,usedFilamentPositions:[...used].sort((a,b)=>a-b),plateInternalPath,sha256,maxNozzleTemperature,maxBedTemperature,maxChamberTemperature,bedType,selectsAms,nozzleTypes,nozzleFlows,filamentNozzleIndices,...(Array.isArray(project.filament_type)?{projectFilaments:projectFilaments(project)}:{})};
+  return {model,nozzleDiameters:inspectedNozzleDiameters,materials,usedFilamentPositions:[...used].sort((a,b)=>a-b),plateInternalPath,sha256,maxNozzleTemperature,maxBedTemperature,maxChamberTemperature,bedType,selectsAms,nozzleTypes:inspectedNozzleTypes,nozzleFlows:inspectedNozzleFlows,filamentNozzleIndices,...(Array.isArray(project.filament_type)?{projectFilaments:projectFilaments(project)}:{})};
 }

@@ -1,11 +1,12 @@
 import { promises as fs, constants as C } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import https from 'node:https';
+import { privateLockHeld, withPrivateLock } from './safety/private-lock.js';
 /** A deliberately small, stable error surface: never include URLs or OS error text. */
 export class WorkspaceArtifactError extends Error {
     constructor(code, message, next_action) {
@@ -43,7 +44,18 @@ function config() {
     const outbox = process.env.BAMBU_ARTIFACT_OUTBOX_DIR;
     if (outbox && !path.isAbsolute(outbox))
         return fail('INVALID_CONFIGURATION', 'Outbox path must be absolute.');
-    const c = { root: path.resolve(root), outbox: outbox && path.resolve(outbox), gid: group === undefined ? undefined : Number(group), maxFile: num('BAMBU_ARTIFACT_MAX_FILE_BYTES', 128 * 1024 ** 2, 1024 ** 3), maxTotal: num('BAMBU_ARTIFACT_MAX_TOTAL_BYTES', 2 * 1024 ** 3, 64 * 1024 ** 3), slots: num('BAMBU_ARTIFACT_MAX_SLOTS', 512, 4096), workspaces: num('BAMBU_ARTIFACT_MAX_WORKSPACES', 128, 1024), idle: num('BAMBU_ARTIFACT_UPLOAD_IDLE_SECONDS', 3600, 86400) * 1000, hard: num('BAMBU_ARTIFACT_UPLOAD_HARD_SECONDS', 14400, 604800) * 1000 };
+    let uploadBase;
+    if (process.env.BAMBU_ARTIFACT_UPLOAD_BASE_URL) {
+        try {
+            uploadBase = new URL(process.env.BAMBU_ARTIFACT_UPLOAD_BASE_URL);
+        }
+        catch {
+            return fail('INVALID_CONFIGURATION', 'Invalid artifact upload base URL.');
+        }
+        if (uploadBase.protocol !== 'https:' || uploadBase.username || uploadBase.password || uploadBase.search || uploadBase.hash || (uploadBase.port && uploadBase.port !== '443') || uploadBase.pathname.endsWith('/'))
+            return fail('INVALID_CONFIGURATION', 'Artifact upload base URL must be a bare HTTPS route without a trailing slash.');
+    }
+    const c = { root: path.resolve(root), outbox: outbox && path.resolve(outbox), uploadBase, gid: group === undefined ? undefined : Number(group), maxFile: num('BAMBU_ARTIFACT_MAX_FILE_BYTES', 128 * 1024 ** 2, 1024 ** 3), maxTotal: num('BAMBU_ARTIFACT_MAX_TOTAL_BYTES', 2 * 1024 ** 3, 64 * 1024 ** 3), slots: num('BAMBU_ARTIFACT_MAX_SLOTS', 512, 4096), workspaces: num('BAMBU_ARTIFACT_MAX_WORKSPACES', 128, 1024), idle: num('BAMBU_ARTIFACT_UPLOAD_IDLE_SECONDS', 3600, 86400) * 1000, hard: num('BAMBU_ARTIFACT_UPLOAD_HARD_SECONDS', 14400, 604800) * 1000 };
     if (c.idle > c.hard)
         return fail('INVALID_CONFIGURATION', 'Upload idle lease exceeds hard lease.');
     return c;
@@ -209,22 +221,30 @@ async function reconcile(c, s) {
         }
     }
     for (const w of Object.values(s.workspaces))
-        for (const [uid, u] of Object.entries(w.uploads))
-            if (u.kind === 'upload') {
-                const h = await fs.open(inputPath(c, uid), C.O_RDWR | C.O_NOFOLLOW);
-                try {
-                    const st = await h.stat();
-                    if (!st.isFile() || st.size < (u.offset ?? 0))
-                        fail('UNSAFE_STORAGE', 'Upload is shorter than its committed offset.');
-                    if (st.size > (u.offset ?? 0)) {
-                        await h.truncate(u.offset ?? 0);
-                        await h.sync();
-                    }
+        for (const [uid, u] of Object.entries(w.uploads)) {
+            if (u.kind === 'http-streaming') {
+                if (!await privateLockHeld(streamingLockPath(c, uid))) {
+                    delete w.uploads[uid];
+                    await fs.rm(inputPath(c, uid), { force: true });
                 }
-                finally {
-                    await h.close();
+                continue;
+            }
+            if (u.kind !== 'upload' && u.kind !== 'http' && u.kind !== 'http-streaming')
+                continue;
+            const h = await fs.open(inputPath(c, uid), C.O_RDWR | C.O_NOFOLLOW);
+            try {
+                const st = await h.stat();
+                if (!st.isFile() || st.size < (u.offset ?? 0))
+                    fail('UNSAFE_STORAGE', 'Upload is shorter than its committed offset.');
+                if (st.size > (u.offset ?? 0)) {
+                    await h.truncate(u.offset ?? 0);
+                    await h.sync();
                 }
             }
+            finally {
+                await h.close();
+            }
+        }
     return cleanup;
 }
 async function verifyLedger(c, s) {
@@ -232,7 +252,7 @@ async function verifyLedger(c, s) {
     const expected = new Set();
     for (const w of Object.values(s.workspaces))
         for (const [uid, u] of Object.entries(w.uploads))
-            if (u.kind === 'upload')
+            if (u.kind === 'upload' || u.kind === 'http' || (u.kind === 'http-streaming' && (await privateLockHeld(streamingLockPath(c, uid)))))
                 expected.add(uid);
     const actual = await fs.readdir(incoming, { withFileTypes: true });
     for (const e of actual) {
@@ -322,11 +342,14 @@ async function locked(c, fn) {
         }
         const now = Date.now(), expired = [];
         for (const w of Object.values(state.workspaces))
-            for (const [uid, u] of Object.entries(w.uploads))
+            for (const [uid, u] of Object.entries(w.uploads)) {
+                if (u.kind === 'http-streaming' && await privateLockHeld(streamingLockPath(c, uid)))
+                    continue;
                 if (now - (u.updated ?? 0) > c.idle || now - (u.created ?? 0) > c.hard) {
                     expired.push(uid);
                     delete w.uploads[uid];
                 }
+            }
         if (expired.length) {
             await saveLedger(c, state);
             for (const uid of expired)
@@ -358,6 +381,7 @@ function quota(s, c, size) {
 function getId(v, kind) { if (!validId(v))
     return fail('INVALID_ARGUMENT', `Invalid ${kind} ID.`); return v; }
 const inputPath = (c, uid) => path.join(c.root, 'private', 'incoming', uid);
+const streamingLockPath = (c, uid) => path.join(c.root, 'private', 'http-locks', uid);
 const result = (wid, aid, e, c) => ({ version: 1, workspace_id: wid, artifact_id: aid, filename: e.filename, size_bytes: e.size_bytes, sha256: e.sha256, file_path: path.join(c.root, 'published', wid, aid, e.filename) });
 async function readRegular(p, max) {
     await noLinks(path.dirname(p));
@@ -398,6 +422,8 @@ async function readExport(c, wid, eid) {
     }).catch(() => fail('UNSAFE_STORAGE', 'Export could not be read safely.', 'Inspect the outbox and export receipt.'));
 }
 const digest = (b) => createHash('sha256').update(b).digest('hex');
+const ticketHash = (value) => createHash('sha256').update(value).digest('hex');
+const ticketEqual = (left, right) => !!left && timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(ticketHash(right), 'hex'));
 async function publish(c, wid, w, uid, u, bytes, options = {}) {
     if (bytes.length !== u.size_bytes || digest(bytes) !== u.sha256)
         fail('INTEGRITY_MISMATCH', 'File size or SHA-256 does not match.', 'Inspect or abort the upload before retrying.');
@@ -497,10 +523,15 @@ async function downloadWithinDeadline(url, max, signal) {
         catch {
             return fail('DOWNLOAD_REJECTED', 'Download URL is invalid.');
         }
+        // A hosted MCP can fetch arbitrary public HTTPS sources itself. Short-lived
+        // MakerWorld object URLs are intentionally not hostname-pinned here; every
+        // hop is constrained by the HTTPS, DNS and IP checks below instead. Operators
+        // can opt into a literal-host egress allowlist when their deployment needs it.
         const hosts = (process.env.BAMBU_ARTIFACT_TRUSTED_HOSTS ?? '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
         const host = u.hostname.toLowerCase();
-        if (u.protocol !== 'https:' || u.username || u.password || u.hash || (u.port && u.port !== '443') || net.isIP(host) || !(host === 'files.oaiusercontent.com' || host.endsWith('.files.oaiusercontent.com') || hosts.includes(host)))
-            fail('DOWNLOAD_REJECTED', 'Download URL is outside the trusted HTTPS host scope.', 'Use an allowed public file host.');
+        const openAiFileHost = host === 'files.oaiusercontent.com' || host.endsWith('.files.oaiusercontent.com');
+        if (u.protocol !== 'https:' || u.username || u.password || u.hash || (u.port && u.port !== '443') || net.isIP(host) || (hosts.length > 0 && !openAiFileHost && !hosts.includes(host)))
+            fail('DOWNLOAD_REJECTED', 'Download URL is outside the permitted HTTPS host scope.', 'Use a public HTTPS file host permitted by the server policy.');
         let addresses;
         try {
             addresses = await dns.lookup(host, { all: true, verbatim: true });
@@ -570,8 +601,9 @@ const specs = [
     ['workspace_attach', 'Attach an existing shared project ID without opening a GUI.', { workspace_id: str }, ['workspace_id']],
     ['workspace_status', 'Inspect storage configuration, or a workspace and its resumable uploads.', { workspace_id: str }, []],
     ['workspace_delete', 'Delete an empty Node workspace only.', { workspace_id: str }, ['workspace_id']],
-    ['workspace_import_file', 'Import a trusted HTTPS file; completed artifacts are retained.', { workspace_id: str, file: { type: 'object', properties: { download_url: str, file_id: str, mime_type: str, file_name: str }, required: ['download_url', 'file_id'], additionalProperties: false }, source_url: str, filename: str, expected_sha256: str }, ['workspace_id']],
+    ['workspace_import_file', 'Import a public HTTPS file; completed artifacts are retained.', { workspace_id: str, file: { type: 'object', properties: { download_url: str, file_id: str, mime_type: str, file_name: str }, required: ['download_url', 'file_id'], additionalProperties: false }, source_url: str, filename: str, expected_sha256: str }, ['workspace_id']],
     ['workspace_upload_begin', 'Reserve an upload with expected size and SHA-256.', { workspace_id: str, filename: str, size_bytes: { type: 'integer' }, sha256: str }, ['workspace_id', 'filename', 'size_bytes', 'sha256']],
+    ['workspace_upload_begin_https', 'Reserve a one-time raw HTTPS PUT URL for a client-local file. Supply its exact byte size and lowercase SHA-256, PUT raw bytes without base64 or an Authorization header, then call workspace_upload_finish with the returned upload_id.', { workspace_id: str, filename: str, size_bytes: { type: 'integer' }, sha256: str }, ['workspace_id', 'filename', 'size_bytes', 'sha256']],
     ['workspace_upload_chunk', 'Append a sequential base64 chunk, at most 512 KiB decoded.', { workspace_id: str, upload_id: str, offset: { type: 'integer' }, data_base64: str }, ['workspace_id', 'upload_id', 'offset', 'data_base64']],
     ['workspace_upload_finish', 'Verify and publish a complete upload.', { workspace_id: str, upload_id: str }, ['workspace_id', 'upload_id']],
     ['workspace_upload_abort', 'Delete an unfinished upload and release its reservation.', { workspace_id: str, upload_id: str }, ['workspace_id', 'upload_id']],
@@ -582,9 +614,9 @@ const specs = [
 ];
 const propertyDescriptions = {
     name: 'Optional human-readable project name.', workspace_id: 'The shared project workspace ID.',
-    file: 'An OpenAI file object to download.', download_url: 'The trusted HTTPS download URL.', file_id: 'The OpenAI file identifier.', mime_type: 'Optional MIME type.', file_name: 'Original filename including its supported extension.',
-    source_url: 'An allowed HTTPS download URL.', filename: 'Filename including a supported extension.', expected_sha256: 'Optional expected lowercase SHA-256 of the downloaded bytes.',
-    size_bytes: 'Exact file size in bytes.', sha256: 'Expected lowercase SHA-256 of the exact bytes.', upload_id: 'The unfinished upload ID.', offset: 'Byte offset for this chunk or read.', data_base64: 'Base64-encoded sequential upload bytes.',
+    file: 'An MCP client file object to download.', download_url: 'A public HTTPS download URL.', file_id: 'The client file identifier.', mime_type: 'Optional MIME type.', file_name: 'Original filename including its supported extension.',
+    source_url: 'A public HTTPS download URL; redirects are revalidated.', filename: 'Filename including a supported extension.', expected_sha256: 'Optional expected lowercase SHA-256 of the downloaded bytes.',
+    size_bytes: 'Exact file size in bytes.', sha256: 'Expected lowercase SHA-256 of the exact bytes.', upload_id: 'The unfinished upload ID. For HTTPS upload, call finish only after the PUT succeeds.', offset: 'Byte offset for this chunk or read.', data_base64: 'Base64-encoded sequential upload bytes.',
     artifact_id: 'The workspace artifact ID.', length: 'Maximum bytes to read.', export_id: 'The finalized Orca export ID.'
 };
 function describeProperties(properties) {
@@ -594,6 +626,127 @@ function describeProperties(properties) {
     }));
 }
 export const workspaceArtifactTools = specs.map(([name, description, properties, required]) => ({ name, description, inputSchema: { type: 'object', properties: describeProperties(properties), required, additionalProperties: false }, ...(name === 'workspace_import_file' ? { _meta: { 'openai/fileParams': ['file'] } } : {}) }));
+/** The public route is fixed by deployment configuration, never by Host input. */
+export function workspaceArtifactUploadPath() {
+    const base = config().uploadBase;
+    return base ? `${base.pathname}/workspace-uploads/` : undefined;
+}
+/**
+ * Consume one opaque upload capability and stream raw bytes into its already
+ * reserved private file. The capability is hashed in the ledger and removed
+ * before reading the body, so it cannot be reused after a timeout or failure.
+ */
+export async function handleWorkspaceArtifactUpload(req, res) {
+    let c;
+    try {
+        c = config();
+    }
+    catch {
+        return false;
+    }
+    const prefix = c.uploadBase ? `${c.uploadBase.pathname}/workspace-uploads/` : undefined;
+    const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+    if (!prefix || !pathname.startsWith(prefix))
+        return false;
+    const ticket = pathname.slice(prefix.length);
+    const reject = (status) => { res.writeHead(status, { 'Cache-Control': 'no-store' }); res.end(); };
+    if (req.method !== 'PUT' || !validId(ticket) || pathname !== `${prefix}${ticket}`) {
+        reject(404);
+        return true;
+    }
+    req.setTimeout?.(15 * 60 * 1000);
+    const length = req.headers['content-length'];
+    if (typeof length !== 'string' || !/^\d+$/.test(length)) {
+        reject(411);
+        return true;
+    }
+    let candidate;
+    try {
+        candidate = await locked(c, async (state) => {
+            const now = Date.now();
+            for (const [workspaceId, workspaceValue] of Object.entries(state.workspaces))
+                for (const [uploadId, entry] of Object.entries(workspaceValue.uploads)) {
+                    if (entry.kind !== 'http' || !entry.ticket_expires || entry.ticket_expires < now || !ticketEqual(entry.ticket_hash, ticket))
+                        continue;
+                    if (Number(length) !== entry.size_bytes)
+                        fail('UPLOAD_REJECTED', 'Upload length does not match its reservation.');
+                    return { workspace: workspaceId, upload: uploadId };
+                }
+            return fail('UPLOAD_REJECTED', 'Upload capability is unknown or expired.');
+        });
+    }
+    catch {
+        reject(404);
+        return true;
+    }
+    let claimed;
+    return await withPrivateLock(streamingLockPath(c, candidate.upload), async () => {
+        try {
+            claimed = await locked(c, async (state) => {
+                const entry = state.workspaces[candidate.workspace]?.uploads[candidate.upload], now = Date.now();
+                if (!entry || entry.kind !== 'http' || !entry.ticket_expires || entry.ticket_expires < now || !ticketEqual(entry.ticket_hash, ticket) || Number(length) !== entry.size_bytes)
+                    return fail('UPLOAD_REJECTED', 'Upload capability is unknown or expired.');
+                delete entry.ticket_hash;
+                delete entry.ticket_expires;
+                entry.kind = 'http-streaming';
+                entry.updated = now;
+                return { workspace: candidate.workspace, upload: candidate.upload, entry: { ...entry } };
+            });
+        }
+        catch {
+            reject(404);
+            return true;
+        }
+        const input = inputPath(c, claimed.upload);
+        const handle = await fs.open(input, C.O_WRONLY | C.O_NOFOLLOW);
+        let size = 0;
+        const hash = createHash('sha256');
+        try {
+            const stat = await handle.stat();
+            if (!stat.isFile() || stat.size !== 0)
+                fail('UNSAFE_STORAGE', 'Upload destination changed.');
+            for await (const raw of req) {
+                const bytes = Buffer.from(raw);
+                size += bytes.length;
+                if (size > claimed.entry.size_bytes)
+                    fail('UPLOAD_REJECTED', 'Upload exceeds its reservation.');
+                hash.update(bytes);
+                let offset = 0;
+                while (offset < bytes.length) {
+                    const write = await handle.write(bytes, offset, bytes.length - offset, size - bytes.length + offset);
+                    if (!write.bytesWritten)
+                        fail('STORAGE_ERROR', 'Upload write made no progress.');
+                    offset += write.bytesWritten;
+                }
+            }
+            await handle.sync();
+        }
+        finally {
+            await handle.close();
+        }
+        if (size !== claimed.entry.size_bytes || hash.digest('hex') !== claimed.entry.sha256)
+            fail('INTEGRITY_MISMATCH', 'Upload bytes do not match the reservation.');
+        await locked(c, async (state) => {
+            const entry = state.workspaces[claimed.workspace]?.uploads[claimed.upload];
+            if (!entry || entry.kind !== 'http-streaming' || entry.offset !== 0 || entry.size_bytes !== claimed.entry.size_bytes || entry.sha256 !== claimed.entry.sha256)
+                fail('UPLOAD_REJECTED', 'Upload reservation was cancelled.');
+            entry.kind = 'http';
+            entry.offset = size;
+            entry.updated = Date.now();
+        });
+        res.writeHead(204, { 'Cache-Control': 'no-store' });
+        res.end();
+        return true;
+    }).catch(async () => {
+        if (claimed)
+            await locked(c, async (state) => { const entry = state.workspaces[claimed.workspace]?.uploads[claimed.upload]; if (entry?.kind === 'http' || entry?.kind === 'http-streaming') {
+                delete state.workspaces[claimed.workspace].uploads[claimed.upload];
+                await fs.rm(inputPath(c, claimed.upload), { force: true });
+            } }).catch(() => { });
+        reject(422);
+        return true;
+    });
+}
 export async function handleWorkspaceArtifactTool(name, args, options = {}) {
     const a = (args && typeof args === 'object' && !Array.isArray(args) ? args : {});
     if (name === 'workspace_status' && a.workspace_id === undefined && !process.env.BAMBU_ARTIFACT_DIR)
@@ -660,7 +813,7 @@ export async function handleWorkspaceArtifactTool(name, args, options = {}) {
             const wid = getId(a.workspace_id, 'workspace');
             const w = workspace(s, wid);
             if (name === 'workspace_status')
-                return { version: 1, workspace_id: wid, uploads: Object.entries(w.uploads).map(([upload_id, e]) => ({ upload_id, ...e })), artifacts: Object.entries(w.artifacts).map(([artifact_id, e]) => result(wid, artifact_id, e, c)) };
+                return { version: 1, workspace_id: wid, uploads: Object.entries(w.uploads).map(([upload_id, e]) => ({ upload_id, filename: e.filename, size_bytes: e.size_bytes, sha256: e.sha256, offset: e.offset, created: e.created, updated: e.updated, kind: e.kind })), artifacts: Object.entries(w.artifacts).map(([artifact_id, e]) => result(wid, artifact_id, e, c)) };
             if (name === 'workspace_delete') {
                 if (Object.keys(w.uploads).length || Object.keys(w.artifacts).length)
                     fail('WORKSPACE_NOT_EMPTY', 'Delete artifacts and abort uploads first.');
@@ -684,17 +837,40 @@ export async function handleWorkspaceArtifactTool(name, args, options = {}) {
                 w.uploads[uid] = { filename: fn, size_bytes: size, sha256: a.sha256, offset: 0, created: Date.now(), updated: Date.now(), kind: 'upload' };
                 return { version: 1, workspace_id: wid, upload_id: uid, offset: 0, size_bytes: size, sha256: a.sha256, filename: fn };
             }
+            if (name === 'workspace_upload_begin_https') {
+                const fn = filename(a.filename), size = integer(a.size_bytes, 0, c.maxFile), uploadUrl = c.uploadBase?.toString();
+                if (!hashOk(a.sha256))
+                    fail('INVALID_ARGUMENT', 'Invalid SHA-256.');
+                if (!uploadUrl)
+                    fail('FEATURE_UNAVAILABLE', 'Raw HTTPS upload is not configured.', 'Configure BAMBU_ARTIFACT_UPLOAD_BASE_URL and its gateway route.');
+                quota(s, c, size);
+                const uid = id(), ticket = id(), now = Date.now(), expires = now + 15 * 60 * 1000;
+                const h = await fs.open(inputPath(c, uid), 'wx', 0o600);
+                try {
+                    await h.sync();
+                }
+                finally {
+                    await h.close();
+                }
+                await syncDir(path.join(c.root, 'private', 'incoming'));
+                w.uploads[uid] = { filename: fn, size_bytes: size, sha256: a.sha256, offset: 0, created: now, updated: now, kind: 'http', ticket_hash: ticketHash(ticket), ticket_expires: expires };
+                return { version: 1, workspace_id: wid, upload_id: uid, upload_url: `${uploadUrl}/workspace-uploads/${ticket}`, method: 'PUT', size_bytes: size, sha256: a.sha256, expires_at: new Date(expires).toISOString() };
+            }
             if (name.startsWith('workspace_upload_')) {
                 const uid = getId(a.upload_id, 'upload');
                 const u = w.uploads[uid];
-                if (!u || u.kind !== 'upload')
+                if (!u || (u.kind !== 'upload' && u.kind !== 'http' && u.kind !== 'http-streaming'))
                     return fail('UPLOAD_NOT_FOUND', 'Upload was not found.');
+                if (u.kind === 'http-streaming')
+                    return fail('UPLOAD_IN_PROGRESS', 'HTTPS upload is still receiving bytes.', 'Cancel the client PUT, wait for it to settle, then inspect workspace status before aborting.');
                 if (name === 'workspace_upload_abort') {
                     delete w.uploads[uid];
                     await saveLedger(c, s);
                     await fs.rm(inputPath(c, uid), { force: true });
                     return { version: 1, workspace_id: wid, upload_id: uid, aborted: true };
                 }
+                if (u.kind === 'http' && name === 'workspace_upload_chunk')
+                    return fail('UPLOAD_NOT_FOUND', 'Upload uses its one-time HTTPS URL.');
                 if (name === 'workspace_upload_chunk') {
                     const offset = integer(a.offset, 0, u.size_bytes);
                     if (offset !== u.offset)

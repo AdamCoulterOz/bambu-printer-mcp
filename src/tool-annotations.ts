@@ -41,6 +41,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   workspace_attach: hints(false, false, true, false),
   workspace_import_file: hints(false, false, false, true),
   workspace_upload_begin: hints(false, false, false, false),
+  workspace_upload_begin_https: hints(false, false, false, true),
   workspace_upload_chunk: hints(false, false, false, false),
   workspace_upload_finish: hints(false, false, false, false),
   workspace_upload_abort: hints(false, true, false, false),

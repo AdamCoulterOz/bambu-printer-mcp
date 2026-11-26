@@ -128,6 +128,60 @@ test('import rejects unsafe URLs and private DNS answers before a connection', a
   } finally { dns.lookup=lookup; for (const k of ['BAMBU_ARTIFACT_DIR','BAMBU_ARTIFACT_GROUP_GID','BAMBU_ARTIFACT_TRUSTED_HOSTS']) delete process.env[k]; await rm(root,{recursive:true,force:true}); }
 });
 
+test('imports a public MakerWorld URL and signed-object redirect without a host allowlist', async () => {
+  const dns=(await import('node:dns/promises')).default, https=(await import('node:https')).default;
+  const {EventEmitter}=await import('node:events'); const lookup=dns.lookup, get=https.get;
+  const root=await mkdtemp(path.join(await realpath(os.tmpdir()),'artifact-makerworld-'));
+  Object.assign(process.env,{BAMBU_ARTIFACT_DIR:root,BAMBU_ARTIFACT_GROUP_GID:String(process.getgid())});
+  try {
+    const workspace_id=(await call('workspace_create',{})).workspace_id; const bytes=Buffer.from('makerworld fixture'); let requests=0;
+    dns.lookup=async host=>[{address:host==='makerworld.com'?'8.8.8.8':'1.1.1.1',family:4}];
+    https.get=(url,opts,callback)=>{ const requestUrl=String(url); const expected=requests++===0?'8.8.8.8':'1.1.1.1'; const req=new EventEmitter(); req.destroy=()=>{}; opts.lookup(new URL(requestUrl).hostname,{},(_error,address)=>assert.equal(address,expected)); queueMicrotask(()=>{const res=new EventEmitter(); if(requests===1){res.statusCode=302;res.headers={location:'https://signed-download.example/object?X-Amz-Signature=opaque'};res.resume=()=>{};}else{res.statusCode=200;res.headers={'content-length':String(bytes.length)};} callback(res); if(requests===2){res.emit('data',bytes);res.emit('end');}}); return req; };
+    const result=await call('workspace_import_file',{workspace_id,source_url:'https://makerworld.com/en/models/fixture',filename:'fixture.3mf'});
+    assert.equal(result.size_bytes,bytes.length); assert.equal(requests,2);
+  } finally { dns.lookup=lookup; https.get=get; delete process.env.BAMBU_ARTIFACT_DIR; delete process.env.BAMBU_ARTIFACT_GROUP_GID; delete process.env.BAMBU_ARTIFACT_TRUSTED_HOSTS; await rm(root,{recursive:true,force:true}); }
+});
+
+test('one-time HTTPS upload capability streams exact bytes and never leaks or reuses its secret', async () => {
+  const { PassThrough }=await import('node:stream'); const {handleWorkspaceArtifactUpload}=await import('../dist/workspace-artifacts.js');
+  const root=await mkdtemp(path.join(await realpath(os.tmpdir()),'artifact-https-upload-'));
+  Object.assign(process.env,{BAMBU_ARTIFACT_DIR:root,BAMBU_ARTIFACT_GROUP_GID:String(process.getgid()),BAMBU_ARTIFACT_UPLOAD_BASE_URL:'https://mcp.example.test/3d-printing'});
+  try {
+    const workspace_id=(await call('workspace_create',{})).workspace_id, bytes=Buffer.from('raw client bytes'), sha256=createHash('sha256').update(bytes).digest('hex');
+    const ticket=await call('workspace_upload_begin_https',{workspace_id,filename:'fixture.3mf',size_bytes:bytes.length,sha256}); const url=new URL(ticket.upload_url);
+    const status=await call('workspace_status',{workspace_id}); assert.equal(JSON.stringify(status).includes(url.pathname.split('/').at(-1)),false);
+    const request=new PassThrough(); request.method='PUT'; request.url=url.pathname; request.headers={'content-length':String(bytes.length)}; const response={status:0,ended:false,writeHead(status){this.status=status;},end(){this.ended=true;}};
+    const pending=handleWorkspaceArtifactUpload(request,response); request.end(bytes); assert.equal(await pending,true); assert.equal(response.status,204);
+    const artifact=await call('workspace_upload_finish',{workspace_id,upload_id:ticket.upload_id}); assert.equal(artifact.sha256,sha256);
+    const reused=new PassThrough(); reused.method='PUT'; reused.url=url.pathname; reused.headers={'content-length':String(bytes.length)}; const rejected={status:0,writeHead(status){this.status=status;},end(){}}; reused.end(bytes); assert.equal(await handleWorkspaceArtifactUpload(reused,rejected),true); assert.equal(rejected.status,404);
+  } finally { for(const key of ['BAMBU_ARTIFACT_DIR','BAMBU_ARTIFACT_GROUP_GID','BAMBU_ARTIFACT_UPLOAD_BASE_URL'])delete process.env[key]; await rm(root,{recursive:true,force:true}); }
+});
+
+test('a restart recovers an orphaned streaming capability without publishing it', async () => {
+  const {readFile,writeFile}=await import('node:fs/promises');
+  const root=await mkdtemp(path.join(await realpath(os.tmpdir()),'artifact-stream-recovery-'));
+  Object.assign(process.env,{BAMBU_ARTIFACT_DIR:root,BAMBU_ARTIFACT_GROUP_GID:String(process.getgid()),BAMBU_ARTIFACT_UPLOAD_BASE_URL:'https://mcp.example.test/3d-printing'});
+  try {
+    const workspace_id=(await call('workspace_create',{})).workspace_id, sha256='0'.repeat(64), ticket=await call('workspace_upload_begin_https',{workspace_id,filename:'fixture.3mf',size_bytes:1,sha256});
+    const ledger=path.join(root,'private','ledger.json'), state=JSON.parse(await readFile(ledger,'utf8')); const entry=state.workspaces[workspace_id].uploads[ticket.upload_id]; entry.kind='http-streaming'; delete entry.ticket_hash; delete entry.ticket_expires; await writeFile(ledger,JSON.stringify(state));
+    const status=await call('workspace_status',{workspace_id}); assert.equal(status.uploads.length,0); assert.equal(status.artifacts.length,0);
+  } finally { for(const key of ['BAMBU_ARTIFACT_DIR','BAMBU_ARTIFACT_GROUP_GID','BAMBU_ARTIFACT_UPLOAD_BASE_URL'])delete process.env[key]; await rm(root,{recursive:true,force:true}); }
+});
+
+test('a second Node process does not truncate a live HTTPS upload', async () => {
+  const { PassThrough }=await import('node:stream'); const {spawn}=await import('node:child_process'); const {handleWorkspaceArtifactUpload}=await import('../dist/workspace-artifacts.js');
+  const root=await mkdtemp(path.join(await realpath(os.tmpdir()),'artifact-live-stream-'));
+  Object.assign(process.env,{BAMBU_ARTIFACT_DIR:root,BAMBU_ARTIFACT_GROUP_GID:String(process.getgid()),BAMBU_ARTIFACT_UPLOAD_BASE_URL:'https://mcp.example.test/3d-printing'});
+  try {
+    const workspace_id=(await call('workspace_create',{})).workspace_id, bytes=Buffer.from('live cross-process upload'), sha256=createHash('sha256').update(bytes).digest('hex'); const ticket=await call('workspace_upload_begin_https',{workspace_id,filename:'fixture.3mf',size_bytes:bytes.length,sha256}), url=new URL(ticket.upload_url);
+    const request=new PassThrough(); request.method='PUT'; request.url=url.pathname; request.headers={'content-length':String(bytes.length)}; const response={status:0,writeHead(status){this.status=status;},end(){}}; const pending=handleWorkspaceArtifactUpload(request,response); request.write(bytes.subarray(0,4)); await new Promise(resolve=>setTimeout(resolve,120));
+    await assert.rejects(call('workspace_upload_abort',{workspace_id,upload_id:ticket.upload_id}),{code:'UPLOAD_IN_PROGRESS'});
+    const child=spawn(process.execPath,['--input-type=module','-e',`import {handleWorkspaceArtifactTool as call} from './dist/workspace-artifacts.js'; await call('workspace_status',{workspace_id:process.env.TEST_WORKSPACE});`],{cwd:process.cwd(),env:{...process.env,TEST_WORKSPACE:workspace_id},stdio:['ignore','ignore','pipe']});
+    const exit=await new Promise((resolve,reject)=>{let error='';child.stderr.on('data',b=>error+=b);child.once('error',reject);child.once('close',code=>code===0?resolve(code):reject(new Error(error||`child ${code}`)));}); assert.equal(exit,0);
+    request.end(bytes.subarray(4)); assert.equal(await pending,true); assert.equal(response.status,204); const artifact=await call('workspace_upload_finish',{workspace_id,upload_id:ticket.upload_id}); assert.equal(artifact.sha256,sha256);
+  } finally { for(const key of ['BAMBU_ARTIFACT_DIR','BAMBU_ARTIFACT_GROUP_GID','BAMBU_ARTIFACT_UPLOAD_BASE_URL'])delete process.env[key]; await rm(root,{recursive:true,force:true}); }
+});
+
 test('redirects are re-resolved and rejected before connecting to private destinations', async () => {
   const dns=(await import('node:dns/promises')).default, https=(await import('node:https')).default;
   const { EventEmitter }=await import('node:events'); const lookup=dns.lookup, get=https.get;

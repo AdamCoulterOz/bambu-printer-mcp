@@ -41,3 +41,19 @@ sys.stdin.buffer.read()
     return await fn();
   } finally { input.end(); await exited; await handle.close(); }
 }
+
+/** Probe the stable inode without waiting. A held lock is a live owner. */
+export async function privateLockHeld(directory: string): Promise<boolean> {
+  let handle;
+  try { handle=await fs.open(join(directory,'.state.lock'),constants.O_RDWR|constants.O_NOFOLLOW); }
+  catch (error: any) { if (error?.code==='ENOENT') return false; throw error; }
+  try {
+    const stat=await handle.stat();
+    if (!stat.isFile() || stat.nlink!==1 || (stat.mode&0o077)!==0 || (process.getuid && stat.uid!==process.getuid())) throw new Error('Private state lock unavailable.');
+    const child=spawn('python3',['-c','import fcntl,sys\ntry: fcntl.flock(3,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(2)\nsys.exit(0)'],{stdio:['ignore','ignore','ignore',handle.fd]});
+    const code=await new Promise<number>(resolve=>{child.once('error',()=>resolve(1));child.once('close',value=>resolve(value ?? 1));});
+    if (code===0) return false;
+    if (code===2) return true;
+    throw new Error('Private state lock unavailable.');
+  } finally { await handle.close(); }
+}

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `workspace_export_print_plates` to the separate Orca service. It exports selected source plates individually rather than relying on an all-plates archive, waits for GUI settlement, rejects a malformed or filament-unassigned retained source plate archive and returns immutable shared-outbox receipts with zero-based printer inspection selectors for partial successes. It cannot inspect, upload or dispatch a printer job.
+
+- Allow workspace imports from public HTTPS sources by default, including MakerWorld links that redirect to short-lived object URLs. Every hop remains DNS-pinned and rejects unsafe addresses, credentials, non-HTTPS schemes, unsupported ports and excess redirects; `BAMBU_ARTIFACT_TRUSTED_HOSTS` optionally restricts egress to literal hosts. Client-local paths still require an attachment-capable client or resumable upload bridge.
+
 - Add optional shared workspace file staging and verified Orca export adoption, with bounded transfers and existing print safety gates preserved. The current Node suite passes 1,604 tests with 29 skips, and the installed npm and MCPB packages pass isolated workspace checks. The Orca fixture passes 56 Linux tests; an isolated shared-mount slice and hash-matched adoption passed without dispatch. The managed services are deployed; an actual user-client attachment handoff remains unverified.
 
 ### Changed
@@ -38,6 +42,10 @@
 - Prepare Dockerfile and Compose packaging for a shared HTTP backend behind a separately managed secure proxy. Avoid eager AJV creation and retained schema caches with lazy, transient validation, and clear the SDK timer on close. A metadata-only benchmark verifies zero idle protocol contexts, not flat memory use.
 
 ### Fixed
+
+- Validate mixed-nozzle X2D exports by mapping logical nozzle declarations to firmware IDs. Cross-check a scalar plate diameter against the selected filament’s first extruder and retain the full live nozzle checks.
+
+- Accept Bambu Studio 2.9's exact dual-nozzle wipe-tower `M104 T<heater> S<target> N0 W|C` marker form, while retaining physical-nozzle, hardware and material temperature validation. Numeric, incomplete and mixed marker variants remain rejected.
 
 - Accept the opaque received storage-frame header byte observed to vary on valid list replies, while validating the frame marker, channel and correlated inner reply. Sending and TLS, authentication, integrity and deadline checks remain unchanged. Read-only list evidence does not establish an upload or print.
 

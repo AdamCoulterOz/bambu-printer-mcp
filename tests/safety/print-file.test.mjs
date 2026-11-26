@@ -744,6 +744,20 @@ test('X2D banner separators, M9711 timelapse and N nozzle index pass only on dua
   for(const command of ['======== M104 S400 ========','==== G1 X0 ====','=== T0 ===','========','= =','M9711 M0 E2 Z1.4 S11 C10 O0 T3000','M9711 M0 E-1 Z1.4 S11 C10 O0 T3000','M9711 M0 E0.5 Z1.4 S11 C10 O0 T3000','M9711 M0 E0 Z1.4 S11 C10 O0 T3000 P1','M9711 E0 Z1.4 S11 C10 O0 T3000','M9711 M0 Z1.4 S11 C10 O0 T3000','M9711 M0 E0 Z1.4 S12 C10 O0 T3000','M9711 M0 E0 Z1.4 S11 C10 O0','M9711 M0 E0 Z1.4 S11 C10 O0 T3000 M104 S400','M9711 M0 E0 Z{layer_z} S11 C10 O0 T3000','M104 S220 N2','M104 S220 N-1','M104 S220 N0.5','M104 S220 N','M140 S55 N0','M191 S40 N0','M104 S400 N0','M104 T1 S400 N0','M109 R400 N1'])
     await assert.rejects(inspect(t,x2dHeader()+command+'\n',{model:'x2d'}),/unsupported|syntax|parameter|temperature|limit|nozzle|dynamic|multiple/i,command);
 });
+test('Bambu Studio 2.9 wipe-tower M104 W/C markers retain exact thermal checks',async t=>{
+  // BambuStudio v02.09.01.70, src/libslic3r/GCode/WipeTower.cpp:
+  // `M104 T<heater> S<target> N0 W|C`; W marks heating and C marks cooling.
+  for(const marker of ['W','C']) {
+    const r=await inspect(t,x2dHeader()+`M104 T1 S220 N0 ${marker}\n`,{model:'x2d'});
+    assert.equal(r.maxNozzleTemperature,220,marker);
+  }
+  for(const command of [
+    'M104 T1 S220 N0 W1','M104 T1 S220 N0 W-1','M104 T1 S220 N0 W C',
+    'M104 T1 S220 W','M104 T1 S220 N1 W','M104 T1 S220 N0 W A',
+    'M104 T1 S220 N0 W X1','M109 T1 S220 N0 W','M104 T1 S400 N0 W',
+  ]) await assert.rejects(inspect(t,x2dHeader()+command+'\n',{model:'x2d'}),/unsupported|parameter|temperature|limit|nozzle/i,command);
+  await assert.rejects(inspect(t,header('P1S')+'M104 T0 S220 N0 W\n',{model:'p1s'}),/unsupported|parameter/i,'single-nozzle model');
+});
 test('pinned official X2D 02.08 change-filament and timelapse templates are inspected literally',async t=>{
   // BambuStudio v02.08.02.61, resources/profiles/BBL/machine/Bambu Lab X2D 0.4 nozzle template <name>.json
   const hashes={change_filament_gcode:'0c10a06ad5f6fb9062082b10edaab5ce465962db1dc2d6ffdccea0f0409748d1',time_lapse_gcode:'65b30d1bfb5f2d5043e7da71cade5c1e561fa596029d9fcd0a171835a5e6a542'};
@@ -796,6 +810,49 @@ test('selected plate filament and physical extruder headers compose a per-filame
     const incomplete=await inspect(t,x2dHeader()+metadata+'T0\nM104 S220\n',{model:'x2d'});
     assert.equal(incomplete.filamentNozzleIndices,undefined);
   }
+});
+
+const mixedX2dEntries=(plate={nozzle_diameter:0.6000000238,first_extruder:0,filament_ids:[0]}, gcodeSuffix='')=>({
+  'Metadata/project_settings.config':{
+    printer_model:'Bambu Lab X2D',nozzle_diameter:['0.6','0.4'],filament_type:['PLA'],
+    nozzle_type:['hardened steel','stainless steel'],nozzle_flow:['standard','high flow'],
+  },
+  'Metadata/plate_1.gcode':header('X2D','PLA','0.6;0.4')+
+    '; nozzle_type = hardened steel;stainless steel\n; nozzle_flow = standard;high flow\n'+
+    '; filament_map = 1\n; physical_extruder_map = 1,0\nT0\nM104 S220\n'+gcodeSuffix,
+  'Metadata/plate_1.json':plate,
+});
+test('X2D mixed logical nozzles normalize to firmware order only with a complete selected binding',async t=>{
+  const expected={model:'x2d',nozzleDiameters:[0.4,0.6]};
+  const result=await inspect(t,'',expected,mixedX2dEntries());
+  assert.deepEqual(result.nozzleDiameters,[0.4,0.6]);
+  assert.deepEqual(result.nozzleTypes,['stainless_steel','hardened_steel']);
+  assert.deepEqual(result.nozzleFlows,['high_flow','standard']);
+  assert.deepEqual(result.filamentNozzleIndices,[1]);
+  await assert.rejects(inspect(t,'',{model:'x2d',nozzleDiameters:[0.6,0.4]},mixedX2dEntries()),/file nozzle diameters/, 'logical request order cannot stand in for firmware order');
+  for(const [name,entries] of [
+    ['contradicted scalar',mixedX2dEntries({nozzle_diameter:0.4,first_extruder:0,filament_ids:[0]})],
+    ['missing first extruder',mixedX2dEntries({nozzle_diameter:0.6,filament_ids:[0]})],
+    ['unselected first extruder',mixedX2dEntries({nozzle_diameter:0.4,first_extruder:1,filament_ids:[0]})],
+    ['ambiguous selected filament list',mixedX2dEntries({nozzle_diameter:0.6,first_extruder:0,filament_ids:[0,0]})],
+    ['missing selected filament list',mixedX2dEntries({nozzle_diameter:0.6,first_extruder:0})],
+  ]) await assert.rejects(inspect(t,'',expected,entries),/mixed-nozzle|first logical extruder/,name);
+  const withoutPhysical=mixedX2dEntries();
+  withoutPhysical['Metadata/plate_1.gcode']=withoutPhysical['Metadata/plate_1.gcode'].replace('; physical_extruder_map = 1,0\n','');
+  const withoutFilament=mixedX2dEntries();
+  withoutFilament['Metadata/plate_1.gcode']=withoutFilament['Metadata/plate_1.gcode'].replace('; filament_map = 1\n','');
+  for(const [name,entries] of [['missing physical map',withoutPhysical],['missing filament map',withoutFilament]])
+    await assert.rejects(inspect(t,'',expected,entries),/mixed-nozzle|physical extruder map|filament map/,name);
+  await assert.doesNotReject(inspect(t,'',expected,mixedX2dEntries({nozzle_diameter:[0.6,0.4],filament_ids:[0]})), 'logical vector remains valid');
+  await assert.doesNotReject(inspect(t,'',expected,mixedX2dEntries({filament_ids:[0]})), 'missing plate diameter remains valid with a full physical map');
+  const equal=await inspect(t,'',{model:'x2d',nozzleDiameters:[0.4,0.4]}, {
+    'Metadata/project_settings.config':{printer_model:'Bambu Lab X2D',nozzle_diameter:['0.4','0.4'],filament_type:['PLA']},
+    'Metadata/plate_1.gcode':x2dHeader('PLA')+'M104 S220\n',
+    'Metadata/plate_1.json':{nozzle_diameter:0.4,filament_ids:[0]},
+  });
+  assert.deepEqual(equal.nozzleDiameters,[0.4,0.4]);
+  const legacy=await inspect(t,header('P1S','PLA','0.4')+'M104 S220\n',{model:'p1s',nozzleDiameters:[0.4]});
+  assert.deepEqual(legacy.nozzleDiameters,[0.4]);
 });
 
 test('malformed or conflicting nozzle-binding headers cannot authorize physical spool selection',async t=>{

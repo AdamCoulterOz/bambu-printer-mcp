@@ -118,7 +118,7 @@ test('every listed tool declares its remote scope, and the arguments its configu
   assert.equal(byName.get_agent_readiness.scope, 'read');
   assert.equal(byName.get_agent_guide.scope, 'read');
   for (const name of ['workspace_status', 'workspace_artifact_info', 'workspace_artifact_read']) assert.equal(byName[name].scope, 'read', name);
-  for (const name of ['workspace_create', 'workspace_attach', 'workspace_import_file', 'workspace_upload_begin', 'workspace_upload_chunk', 'workspace_upload_finish', 'workspace_adopt_export']) assert.equal(byName[name].scope, 'design', name);
+  for (const name of ['workspace_create', 'workspace_attach', 'workspace_import_file', 'workspace_upload_begin', 'workspace_upload_begin_https', 'workspace_upload_chunk', 'workspace_upload_finish', 'workspace_adopt_export']) assert.equal(byName[name].scope, 'design', name);
   for (const name of ['workspace_upload_abort', 'workspace_delete', 'workspace_artifact_delete']) assert.equal(byName[name].scope, 'control', name);
   for (const name of ['account_status', 'account_login', 'account_cancel_login', 'account_list_printers', 'account_logout']) assert.equal(byName[name].scope, 'raw', name);
   assert.equal(byName.account_login.arguments.region, 'config');

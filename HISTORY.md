@@ -1,5 +1,13 @@
 # Decision history
 
+## 2026-11-24 — Mixed-nozzle X2D inspection
+
+The selected G-code’s complete physical-extruder map determines firmware order for nozzle diameter, type and flow comparisons. A scalar first-extruder diameter requires a corroborating single-filament selection. The inspector preserves the archive bytes and checks both installed nozzle declarations at preflight. Exact Arachne and Classic TPU exports passed isolated file inspection and synthetic HS01 external-tray preflight.
+
+## 2026-11-23 — Plate-granular Orca handoff
+
+The upstream all-plates sliced-3MF export is not accepted as a handoff unit: its per-plate filament metadata may be incomplete even when one final plate is populated. Individual Orca exports retain their original `Metadata/plate_N` numbering and can include metadata for other plates, so the gateway validates exactly the requested plate's only G-code entry and matching JSON rather than assuming normalization. The composite, no-dispatch handoff records the same zero-based source and printer-inspection artifact plate index, waits for GUI settlement and publishes immutable receipts. It returns partial successes explicitly, and stops starting later plates if settlement cannot be proved or its 105-second request budget is reached. The pinned native gateway rejects waits over 50 seconds, so the public composite schema uses that actual per-plate ceiling instead of accepting a request it cannot forward. Printer-side inspection, material mapping, preflight and dispatch remain separate gates.
+
 ## 2026-11-21 — Printing stack checkpoint
 
 Saved the plugin package and shared skill, configured ZimaOS deployment templates, OAuth gateway source and Orca qualification helpers on the printer MCP checkpoint branch. This makes the source for the separate services recoverable together. Credential files and service state remain in their private stores. Runtime code and service boundaries are unchanged by the checkpoint.
