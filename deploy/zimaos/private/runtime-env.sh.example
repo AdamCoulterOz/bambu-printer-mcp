@@ -8,6 +8,10 @@ export BAMBU_MODEL='__SET_PRINTER_MODEL__'
 export BAMBU_SERIAL='__SET_PRINTER_SERIAL__'
 export PRINTER_HOST='__SET_PRINTER_HOST__'
 export BAMBU_TOKEN_FILE='/run/bambu-secrets/printer-access-token'
+# Optional extra printers (README: More than one printer). Each access code is
+# its own 0600 file in the secrets mount, never in this list.
+# export BAMBU_PRINTER_NAME='__SET_DEFAULT_PRINTER_NAME__'
+# export BAMBU_PRINTERS_FILE='/run/bambu-secrets/printers.json'
 export BAMBU_PRINTER_TLS_CA_FILE='/run/bambu-secrets/printer-tls-cas.pem'
 export BAMBU_RESUME_STATE_DIR='/home/node/.config/bambu-printer-mcp/resume'
 export BAMBU_SIGNED_CONTROLS='true'

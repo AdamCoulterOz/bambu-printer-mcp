@@ -98,6 +98,7 @@ export const REMOTE_SCOPES = {
     account_login: "raw",
     account_cancel_login: "raw",
     account_list_printers: "raw",
+    list_configured_printers: "read",
     account_list_filament_inventory: "raw",
     account_cloud_print_history: "raw",
     account_cloud_print_thumbnail: "raw",
@@ -126,7 +127,7 @@ const RAISED_BY = {
  * account and credentials, its hardware, and the programs it runs.
  */
 export const CONFIG_ARGUMENTS = new Set([
-    "host", "port", "api_key", "username", "password", "dev_ip", "dev_id", "bambu_serial", "bambu_token", "user_info",
+    "host", "port", "api_key", "username", "password", "dev_ip", "dev_id", "bambu_serial", "bambu_token", "printer", "user_info",
     "country_code", "connection_type", "connection_mode", "route", "bambu_model", "nozzle_diameter", "nozzle_diameters",
     "bridge_command", "slicer_path", "slicer_type", "ffmpeg_path", "plugin_dir", "runtime_dir", "template_dir",
     "config_filename", "bambu_network_method", "use_ssl_for_mqtt", "use_ssl_for_ftp", "extra_options",
