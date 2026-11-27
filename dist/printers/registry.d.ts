@@ -34,7 +34,7 @@ export declare class PrinterSelectionError extends Error {
  * Values the caller passed explicitly are kept; a conflicting serial or model
  * is refused rather than silently mixing two printers.
  */
-export declare function applyPrinterSelection(args: Record<string, unknown> | undefined, registry: ConfiguredPrinter[]): Record<string, unknown> | undefined;
+export declare function applyPrinterSelection(args: Record<string, unknown> | undefined, registry: ConfiguredPrinter[], accepted?: ReadonlySet<string>): Record<string, unknown> | undefined;
 /** Public listing: never includes access codes. */
 export declare function describePrinters(registry: ConfiguredPrinter[]): {
     connection_mode?: string | undefined;

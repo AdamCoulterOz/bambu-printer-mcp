@@ -2790,7 +2790,7 @@ export class BambuPrinterMCPServer {
   }
 
   setupToolHandlers(server: Server) {
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listTools = async () => {
       return {
         tools: [
           AGENT_READINESS_TOOL,
@@ -4051,7 +4051,13 @@ export class BambuPrinterMCPServer {
           }
         ].map(withPrinterChoice).map(withAnnotations).map(withRemote)
       };
-    });
+    };
+    server.setRequestHandler(ListToolsRequestSchema, listTools);
+    // A selected printer fills only the routing arguments each tool declares.
+    let toolArguments: Promise<Map<string, Set<string>>> | undefined;
+    const declaredArguments = async (tool: string) => (await (toolArguments ??= listTools().then(({ tools }) =>
+      new Map(tools.map(entry => [entry.name, new Set(Object.keys((entry.inputSchema as { properties?: object }).properties ?? {}))])))
+    )).get(tool);
 
     // A designer's settings extracted for this call are removed when it settles.
     server.setRequestHandler(CallToolRequestSchema, (request, extra) => withRequestOwner(server, extra, () => withPrintDispatch(() => withExtractedSettingsCleanup(async () => {
@@ -4060,7 +4066,7 @@ export class BambuPrinterMCPServer {
       let args: typeof requestedArgs;
       try {
         if (PRINTER_REGISTRY_ERROR && requestedArgs?.printer !== undefined) throw new PrinterSelectionError(PRINTER_REGISTRY_ERROR);
-        args = applyPrinterSelection(requestedArgs, PRINTER_REGISTRY);
+        args = applyPrinterSelection(requestedArgs, PRINTER_REGISTRY, await declaredArguments(name));
       } catch (error) {
         if (!(error instanceof PrinterSelectionError)) throw error;
         return { isError: true, content: [{ type: "text" as const, text: error.message }] };

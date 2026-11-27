@@ -65,6 +65,13 @@ test("printer by name or serial fills that printer's routing", t => {
   assert.deepEqual(applyPrinterSelection({ printer: "X2D" }, printers), { bambu_serial: "20PTEST", host: "10.0.0.2", bambu_token: "x2d-code", bambu_model: "x2d" });
 });
 
+test("only routing arguments the tool declares are filled", t => {
+  const printers = registry(t);
+  assert.deepEqual(applyPrinterSelection({ printer: "A1", file_path: "/x.3mf" }, printers, new Set(["file_path", "bambu_model"])), { file_path: "/x.3mf", bambu_model: "a1" });
+  // Conflicts are still refused even when the tool does not take the conflicting argument's partner.
+  assert.throws(() => applyPrinterSelection({ printer: "A1", bambu_model: "x2d" }, printers, new Set(["bambu_model"])), /does not match/);
+});
+
 test("a registered serial alone selects that printer; other calls are unchanged", t => {
   const printers = registry(t);
   assert.equal(applyPrinterSelection({ bambu_serial: "039test" }, printers).host, "10.0.0.3");
@@ -113,6 +120,10 @@ test("the server lists configured printers and refuses an unknown printer", asyn
   const body = JSON.parse(listed.content[0].text);
   assert.deepEqual(body.printers.map(p => [p.name, p.model, p.default]), [["Big", "x2d", true], ["A1", "a1", false]]);
   assert.equal(listed.content[0].text.includes("dummy"), false);
+  // A file-only tool receives just the selected model, not connection arguments it refuses.
+  const inspected = await client.callTool({ name: "inspect_print_file", arguments: { printer: "A1", file_path: path.join(dir, "missing.3mf") } });
+  assert.equal(inspected.isError, true);
+  assert.doesNotMatch(JSON.stringify(inspected.content), /accepts only/);
   const refused = await client.callTool({ name: "get_printer_status", arguments: { printer: "Nope" } });
   assert.equal(refused.isError, true);
   assert.match(refused.content[0].text, /Unknown printer "Nope". Configured printers: Big, A1/);

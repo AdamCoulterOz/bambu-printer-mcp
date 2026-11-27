@@ -92,7 +92,7 @@ function findPrinter(registry, wanted) {
  * Values the caller passed explicitly are kept; a conflicting serial or model
  * is refused rather than silently mixing two printers.
  */
-export function applyPrinterSelection(args, registry) {
+export function applyPrinterSelection(args, registry, accepted) {
     if (!args)
         return args;
     const requested = args.printer;
@@ -127,22 +127,24 @@ export function applyPrinterSelection(args, registry) {
     if (explicitModel && printer.model && explicitModel !== printer.model) {
         throw new PrinterSelectionError(`bambu_model ${explicitModel} does not match printer ${printer.name} (${printer.model}).`);
     }
-    const out = { ...rest, bambu_serial: printer.serial };
-    if (!text(rest.host))
-        out.host = printer.host;
-    if (!text(rest.bambu_token))
-        out.bambu_token = printer.token;
-    if (!explicitModel && printer.model)
-        out.bambu_model = printer.model;
+    // Only the routing arguments the tool declares are filled, so a file-only tool gets just the model.
+    const out = { ...rest };
+    const fill = (key, value) => {
+        if (value === undefined || text(rest[key]) || (accepted && !accepted.has(key)))
+            return;
+        out[key] = value;
+    };
+    fill("bambu_serial", printer.serial);
+    fill("host", printer.host);
+    fill("bambu_token", printer.token);
+    if (printer.model)
+        fill("bambu_model", printer.model);
     if (!printer.isDefault) {
         // The server-wide default route was chosen for the default printer. Another
         // printer uses its own configured route, else the per-model default.
-        if (!text(rest.connection_mode))
-            out.connection_mode = printer.connectionMode ?? (printer.model === "x2d" ? "bambu_native" : "lan_mqtt_ftps");
-        if (!text(rest.connection_type) && printer.connectionType)
-            out.connection_type = printer.connectionType;
-        if (!text(rest.dev_id))
-            out.dev_id = printer.serial;
+        fill("connection_mode", printer.connectionMode ?? (printer.model === "x2d" ? "bambu_native" : "lan_mqtt_ftps"));
+        fill("connection_type", printer.connectionType);
+        fill("dev_id", printer.serial);
     }
     return out;
 }
