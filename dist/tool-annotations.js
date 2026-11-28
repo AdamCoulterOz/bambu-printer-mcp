@@ -68,6 +68,7 @@ export const TOOL_ANNOTATIONS = {
     // Local reads
     account_status: READ_LOCAL, // reads only the private local account-session state
     account_list_printers: READ_OUTSIDE, // reads Bambu's live account API
+    list_configured_printers: READ_LOCAL, // this server's printer list; never contacts a printer
     account_login: hints(false, false, false, true), // starts a temporary browser login and can contact Bambu
     account_cancel_login: hints(false, false, true, false), // closes the pending local login
     account_logout: hints(false, true, true, false), // deletes the local account session, not the remote session

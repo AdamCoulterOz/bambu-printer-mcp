@@ -16,6 +16,8 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
+      # The TUTK camera tests encode and decode real H.264 frames with ffmpeg.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: npm ci
       - run: npm test
 
@@ -27,6 +29,7 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
+      - run: brew install ffmpeg
       - run: npm ci
       - run: npm run build:native
       - run: npm test

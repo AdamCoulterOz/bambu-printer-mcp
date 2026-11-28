@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Let one server control several printers. List extra printers in `BAMBU_PRINTERS` or `BAMBU_PRINTERS_FILE` (access codes from a file or environment variable), pick one with the new `printer` argument on every printer tool, and see them with `list_configured_printers`. The configured printer stays the default, and calls without `printer` behave as before.
+
 - Add `workspace_export_print_plates` to the separate Orca service. It exports selected source plates individually rather than relying on an all-plates archive, waits for GUI settlement, rejects a malformed or filament-unassigned retained source plate archive and returns immutable shared-outbox receipts with zero-based printer inspection selectors for partial successes. It cannot inspect, upload or dispatch a printer job.
 
 - Allow workspace imports from public HTTPS sources by default, including MakerWorld links that redirect to short-lived object URLs. Every hop remains DNS-pinned and rejects unsafe addresses, credentials, non-HTTPS schemes, unsupported ports and excess redirects; `BAMBU_ARTIFACT_TRUSTED_HOSTS` optionally restricts egress to literal hosts. Client-local paths still require an attachment-capable client or resumable upload bridge.

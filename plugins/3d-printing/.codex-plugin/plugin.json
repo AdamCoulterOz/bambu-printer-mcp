@@ -11,7 +11,7 @@
     "shortDescription": "Prepare and manage 3D prints"
   },
   "name": "3d-printing",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Prepare, slice, inspect, and manage 3D prints using connected services.",
   "author": {
     "name": "Adam Coulter"

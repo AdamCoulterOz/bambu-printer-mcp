@@ -581,6 +581,21 @@ All printer tools accept optional `host`, `bambu_serial`, and `bambu_token` argu
 
 The server also accepts the alias variables `BAMBU_PRINTER_HOST`, `BAMBU_PRINTER_SERIAL`, and `BAMBU_PRINTER_ACCESS_TOKEN`, plus `BAMBU_PRINTER_MODEL` and `BAMBU_STUDIO_PATH`.
 
+#### More than one printer
+
+One server can control several printers. The printer set by the variables above stays the default (name it with `BAMBU_PRINTER_NAME`; otherwise its model is its name). List the others as JSON in `BAMBU_PRINTERS`, or in a file named by `BAMBU_PRINTERS_FILE`:
+
+```json
+[
+  { "name": "A1", "serial": "03900D5B0000000", "host": "192.168.1.171", "model": "a1",
+    "access_code_file": "/run/bambu-secrets/a1-access-token" }
+]
+```
+
+Each printer needs `name`, `serial`, `host` and `model`. Give its LAN access code with `access_code_file` (a file holding only the code) or `access_code_env` (the name of an environment variable); the code itself is refused inside the list. `connection_mode` and `connection_type` are optional: an extra printer does not inherit `BAMBU_DEFAULT_CONNECTION_MODE`, and uses `lan_mqtt_ftps` (an X2D, `bambu_native`) unless you set one.
+
+Every tool that targets a printer or model then takes `printer`, the printer's name or serial, and fills in that printer's host, access code, model and route. Passing a registered serial as `bambu_serial` does the same. A `bambu_serial` or `bambu_model` that disagrees with `printer` is refused, and print safety still checks the printer's own fresh identity. `list_configured_printers` lists the printers by name, model and serial, without access codes. Server-wide settings such as signed controls and the Bambu account apply to every printer.
+
 #### get_printer_status
 
 Retrieve current printer state including temperatures, print progress, layer count, time remaining, and AMS slot data. The default compact response is a single JSON text block; it is display data and may be cached or incomplete. Set `fresh: true` for verified fresh identity telemetry; this is not a complete print safety check. Set `detail: "full"` for the legacy full response.

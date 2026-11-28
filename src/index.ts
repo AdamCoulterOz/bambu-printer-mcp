@@ -6,6 +6,7 @@ import {physicalProblems} from "./counterpart/visual-evidence.js";
 import {flightKey} from "./counterpart/flight-record.js";
 import {FLIGHT_RECORD_PROPERTIES,FLIGHT_RECORD_DESCRIPTION,FLIGHT_RECORD_OUTPUT_SCHEMA,flightReadOptions,flightRecordResult,FLIGHT_ASSESS_PROPERTIES,FLIGHT_ASSESS_REQUIRED,FLIGHT_ASSESS_DESCRIPTION,PRINT_EVIDENCE_GUIDANCE,visualSubmission} from "./counterpart/flight-tools.js";
 import {CAMERA_STREAM_TOOLS} from "./printers/camera-tools.js";
+import { applyPrinterSelection, describePrinters, loadPrinterRegistry, PrinterSelectionError, withPrinterChoice, type ConfiguredPrinter } from "./printers/registry.js";
 import { withAnnotations } from "./tool-annotations.js";
 import { resolveSignedControlConfiguration, signedControlConfiguration, SignedTransport, sendSignedControl, sendTypedLight, signedControlsRequested, accountManager } from "./signing-transport.js";
 import type { CommandInput } from "./signing/index.js";
@@ -271,6 +272,23 @@ function assertUniformCliNozzles(args: Record<string, any>): void {
 }
 
 const VALID_BAMBU_MODELS = ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2dpro", "h2s", "h2c", "x2d"] as const;
+
+/**
+ * Every printer this server can address by name (src/printers/registry.ts). A
+ * broken extra-printer list never stops the default printer: it is reported on
+ * stderr, and selecting a printer by name then fails with the same reason.
+ */
+let PRINTER_REGISTRY_ERROR: string | undefined;
+const PRINTER_REGISTRY: ConfiguredPrinter[] = (() => {
+  const defaults = { name: process.env.BAMBU_PRINTER_NAME, host: DEFAULT_HOST, serial: DEFAULT_BAMBU_SERIAL, token: DEFAULT_BAMBU_TOKEN, model: DEFAULT_BAMBU_MODEL };
+  try {
+    return loadPrinterRegistry(process.env, defaults, VALID_BAMBU_MODELS);
+  } catch (error) {
+    PRINTER_REGISTRY_ERROR = `Configured printer list unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(PRINTER_REGISTRY_ERROR);
+    return loadPrinterRegistry({}, defaults, VALID_BAMBU_MODELS);
+  }
+})();
 
 /** The Send dialog options a caller set explicitly; the rest resolve as Bambu Studio does (studio-print-options.ts). */
 function callerPrintOptions(args: Record<string, any> | undefined): CallerPrintOptions {
@@ -2772,7 +2790,7 @@ export class BambuPrinterMCPServer {
   }
 
   setupToolHandlers(server: Server) {
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listTools = async () => {
       return {
         tools: [
           AGENT_READINESS_TOOL,
@@ -2783,6 +2801,7 @@ export class BambuPrinterMCPServer {
           { name: "account_setup_signing", description: "Explicitly issue or renew signing credentials. Automatic setup downloads one verified official package; supplied APK and private source files remain supported. Requires BAMBU_SIGNING_BOOTSTRAP_ENABLED=true and a private signing directory. Returns expiry; no secrets are accepted as arguments.", inputSchema: { type: "object", properties: { region: { type: "string", enum: ["global", "china"], description: "Bambu region for issuance." }, method: { type: "string", enum: ["automatic", "apk", "files"], description: "Source method; omission preserves configured sources and otherwise selects automatic." } }, required: ["region"], additionalProperties: false } },
           { name: "account_cancel_login", description: "Cancel the pending local browser login.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
           { name: "account_list_printers", description: "List printer names, models and serials bound to the cached Bambu account; contacts Bambu.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+          { name: "list_configured_printers", description: "List the printers this server is set up to control, by name, model and serial, and which one is the default. Pass a name or serial as the printer argument of a printer tool to use that printer. Never returns access codes and does not contact the printers.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
           { name: "account_list_filament_inventory", description: "Read the Bambu account cloud filament library, including manually added and unloaded reels. Cloud weights are reported values, not measurements; null means unknown. Requires complete cloud credentials or a cached account session. A no-total response is one bounded catalogue read; neither mode proves an atomic snapshot or independent account count.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
           { name: "account_filament_manager", description: "Manage the configured Bambu account filament library. The operation config or pending reads account data. create/update/delete modify explicitly identified reels. sync_mappings requires an explicit bind or unbind for every selected slot; sync_ams requires complete explicit RFID items and an explicit createNew to create a reel. resolve_pending accepts accept, link_other or create_new. Use account_list_filament_inventory first for IDs. The selected configured printer supplies devId. Cloud writes can be rejected or uncertain; inspect inventory before retrying. Payload fields are described by each operation and follow the Bambu cloud filament schema.", inputSchema: { type: "object", properties: { operation: { type: "string", description: "Choose the account read or the explicit inventory change to perform.", enum: ["config", "pending", "create", "update", "delete", "sync_mappings", "sync_ams", "resolve_pending"] }, payload: { type: "object", description: "config uses {}. pending accepts optional amsSn. create requires filamentName and accepts filamentId, filamentType, filamentVendor, color, colorType, colors, netWeight, totalNetWeight, note, trayIdName, createType, isSupport, RFID, rolls and status. update adds the numeric id. delete accepts ids as numeric spool IDs. sync_mappings accepts mappings, each with explicit operation bind/unbind, amsId, amsSn, amsType and slotId. Bind adds spoolId and optional rfid. sync_ams accepts items, each requiring RFID, amsId, amsSn, amsType, slotId, color, colorType, colors, filamentId, filamentName, filamentType, filamentVendor, isSupport, netWeight, totalNetWeight, note and trayIdName, with spoolId for an existing reel or explicit createNew:true for a new reel. resolve_pending accepts action accept, create_new or link_other, plus spoolId and targetSpoolId for link_other." } }, required: ["operation"], additionalProperties: false } },
           { name: "account_cloud_print_history", description: "Read one printer-filtered Bambu history page. Carry next_offset to request another page; printer_reported_total is the upstream filtered total, not an account total. Pages are cached separately for 60 seconds and are not an atomic snapshot. No print is initiated.", inputSchema: { type: "object", properties: {offset:{type:"integer",minimum:0,maximum:10000000,default:0,description:"Zero-based upstream page offset; use the previous next_offset to continue."},limit:{type:"integer",minimum:1,maximum:100,default:50,description:"Maximum tasks requested for this page, from 1 to 100; defaults to 50."}}, additionalProperties: false } },
@@ -4030,14 +4049,28 @@ export class BambuPrinterMCPServer {
             },
             outputSchema: FUSION_EXPORT_OUTPUT_SCHEMA
           }
-        ].map(withAnnotations).map(withRemote)
+        ].map(withPrinterChoice).map(withAnnotations).map(withRemote)
       };
-    });
+    };
+    server.setRequestHandler(ListToolsRequestSchema, listTools);
+    // A selected printer fills only the routing arguments each tool declares.
+    let toolArguments: Promise<Map<string, Set<string>>> | undefined;
+    const declaredArguments = async (tool: string) => (await (toolArguments ??= listTools().then(({ tools }) =>
+      new Map(tools.map(entry => [entry.name, new Set(Object.keys((entry.inputSchema as { properties?: object }).properties ?? {}))])))
+    )).get(tool);
 
     // A designer's settings extracted for this call are removed when it settles.
     server.setRequestHandler(CallToolRequestSchema, (request, extra) => withRequestOwner(server, extra, () => withPrintDispatch(() => withExtractedSettingsCleanup(async () => {
       extra.signal.throwIfAborted();
-      const { name, arguments: args } = request.params;
+      const { name, arguments: requestedArgs } = request.params;
+      let args: typeof requestedArgs;
+      try {
+        if (PRINTER_REGISTRY_ERROR && requestedArgs?.printer !== undefined) throw new PrinterSelectionError(PRINTER_REGISTRY_ERROR);
+        args = applyPrinterSelection(requestedArgs, PRINTER_REGISTRY, await declaredArguments(name));
+      } catch (error) {
+        if (!(error instanceof PrinterSelectionError)) throw error;
+        return { isError: true, content: [{ type: "text" as const, text: error.message }] };
+      }
       if (workspaceArtifactTools.some(tool => tool.name === name)) {
         try {
           const result = await handleWorkspaceArtifactTool(name, args ?? {}, { signal: extra.signal });
@@ -4263,6 +4296,9 @@ export class BambuPrinterMCPServer {
           case "account_list_printers":
             if (args && Object.keys(args).length) throw new Error("account_list_printers does not accept arguments.");
             result = { printers: await accountManager.listPrinters() }; break;
+          case "list_configured_printers":
+            if (args && Object.keys(args).length) throw new Error("list_configured_printers does not accept arguments.");
+            result = { printers: describePrinters(PRINTER_REGISTRY), ...(PRINTER_REGISTRY_ERROR ? { error: PRINTER_REGISTRY_ERROR } : {}) }; break;
           case "account_list_filament_inventory":
             if (args && Object.keys(args).length) throw new Error("account_list_filament_inventory does not accept arguments.");
             result = await accountManager.listFilamentInventory(process.env, extra.signal);
